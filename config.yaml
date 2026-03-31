@@ -1,0 +1,30 @@
+# Non-secret behavior. Channel IDs are public-ish but keep this file out of public repos if you prefer.
+
+timezone: UTC
+
+discord:
+  # Use ephemeral replies for /summary and /note (only visible to the user)
+  ephemeral_default: true
+
+reports:
+  # Discord channel ID for scheduled reports (integer). Set to 0 to disable posting.
+  channel_id: 0
+
+schedules:
+  abandoned:
+    enabled: true
+    # How often to run (hours)
+    interval_hours: 24
+    # Tickets not updated in this many days (status must be open, not closed)
+    max_days_without_update: 14
+    max_issues: 50
+
+  stale_new:
+    enabled: true
+    interval_hours: 24
+    # Created at least this many hours ago
+    min_age_hours: 2
+    require_unassigned: true
+    # Count Redmine journals; 1 often means "only creation" (tune for your Redmine)
+    max_journal_entries: 1
+    max_issues: 50
