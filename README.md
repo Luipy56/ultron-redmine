@@ -23,7 +23,7 @@ Small **Discord → Redmine → LLM** bot: slash commands for ticket summaries a
 
 3. Copy [`.env.example`](.env.example) to `.env` and fill in values (see below).
 
-4. Edit [`config.yaml`](config.yaml): set `reports.channel_id` to a Discord channel ID where the bot may post scheduled reports, or leave `0` to disable scheduled posting.
+4. Edit [`config.yaml`](config.yaml): set `reports.channel_id` to a Discord channel ID where the bot may post scheduled reports, or leave `0` to disable scheduled posting. Adjust `timezone`, `discord.*`, and optional `llm_chain` as needed. Every key is also listed (with empty/null placeholders) in [`config.example.yaml`](config.example.yaml). The default config path is `config.yaml`; to use another file (e.g. `config.yml`), set **`CONFIG_PATH`** in `.env`.
 
 5. Run:
 
@@ -40,7 +40,7 @@ Small **Discord → Redmine → LLM** bot: slash commands for ticket summaries a
 | `DISCORD_TOKEN` | Yes | Bot token (Developer Portal → **Bot**). |
 | `REDMINE_URL` | Yes | Base URL, no trailing slash (e.g. `https://redmine.example.com`). |
 | `REDMINE_API_KEY` | Yes | Redmine API key. |
-| `LLM_API_KEY` | Yes | API key for the LLM provider (use a dummy value for Ollama if required). |
+| `LLM_API_KEY` | Usually yes | API key for the LLM provider (dummy for Ollama). **Optional** if `config.yaml` has a non-empty `llm_chain` (keys then come from each entry’s `api_key_env`). |
 | `LLM_BASE_URL` | No | Default `https://api.openai.com/v1`. For Ollama: `http://127.0.0.1:11434/v1`. |
 | `LLM_MODEL` | No | Default `gpt-4o-mini`. |
 | `LLM_TIMEOUT_SECONDS` | No | HTTP timeout for LLM calls (seconds). Default **900** (15 minutes). Increase for large tickets on slow local models; note Discord slash interactions expire sooner. |
@@ -50,7 +50,7 @@ Small **Discord → Redmine → LLM** bot: slash commands for ticket summaries a
 | `OLLAMA_MODEL` | No | Used when `LLM_MODEL` is empty. |
 | `DISCORD_GUILD_ID` | No | If set, slash commands sync to this server immediately (handy for development). |
 | `DISCORD_APPLICATION_ID` | No | Optional; not required for the gateway bot. |
-| `CONFIG_PATH` | No | Path to `config.yaml` (default `./config.yaml`). |
+| `CONFIG_PATH` | No | Path to the YAML config file (default `./config.yaml`). Use e.g. `config.yml` if you prefer that extension. |
 | `ULTRON_STATE_DIR` | No | Directory for **whitelist**, **admins**, and **pending `/token` data** (default `./data`). Not committed to git; use an absolute path in production if the working directory changes. |
 | `BOT_OWNER_CONTACT` | No | Optional line (e.g. email or handle) appended to the English DM sent to users who are not whitelisted yet. |
 | `DISCORD_ADMIN_IDS` | No | Comma- or space-separated Discord user IDs that are **bot admins** (may use **`/approve`**). Merged with `admins.json` in `ULTRON_STATE_DIR`. |
@@ -73,8 +73,23 @@ Small **Discord → Redmine → LLM** bot: slash commands for ticket summaries a
 - **Ollama**: `LLM_BASE_URL=http://127.0.0.1:11434/v1`, `LLM_API_KEY=ollama`, `LLM_MODEL=llama3.2`. Default timeout **900s**; override with `LLM_TIMEOUT_SECONDS`. **No SDK retries** by default when Ollama is detected.
 - **OpenRouter**: use their OpenAI-compatible base URL and key from their dashboard.
 
+### LLM provider chain (`llm_chain` in `config.yaml`)
+
+`llm_chain` is an **ordered YAML list**: index **0** is the primary backend, then fallbacks. No per-entry `id` field — order is the hierarchy. Each item is OpenAI-compatible (**OpenAI**, **OpenRouter**, **Ollama** at `http://127.0.0.1:11434/v1`, etc.).
+
+On provider failures Ultron logs the reason (policy line), the entry’s optional **`name`** (or index) and **`model`**, then tries the next list item. That includes **wrong URL or key** (**401**, **403**), **bad model/params** (**400**), **404**, **429**, **5xx**, and **connection/timeout** errors — so a misconfigured chain slot does not block the rest.
+
+- **Optional `name`**: free-form label for readability in YAML and in logs (startup chain line and fallback warnings). Omit or leave unset to use list index only.
+- **Secrets** only in the environment: each entry sets `api_key_env` (e.g. `OPENAI_API_KEY`, `OLLAMA_API_KEY`); use `ollama` as the value for local Ollama when that matches your setup.
+- For **Ollama** in the chain, prefer **`max_retries: 0`** and a generous **`timeout_seconds`** (e.g. 900) on that entry.
+- **Empty LLM reply** (`""`) is still success; no fallback for empty content.
+- **`{model}` in `discord.summary_status_llm`**: **first** list entry’s `model`.
+- If `llm_chain` is **absent or empty** (`[]`), behavior is unchanged: `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` from the environment drive a single client.
+- Example block: see [`config.yaml`](config.yaml) (commented) and [`config.example.yaml`](config.example.yaml).
+
 ## `config.yaml`
 
+- **`llm_chain`**: Optional ordered list of OpenAI-compatible backends (see [LLM provider chain](#llm-provider-chain-llm_chain-in-configyaml)). List order is priority; when non-empty, it replaces single-provider `LLM_*` env vars for LLM calls.
 - **`logging.log_read_messages`**: If `true`, the `ultron.read` logger records **full** text Ultron ingests: formatted Redmine ticket bodies, the `/note` slash text, and complete LLM `system`/`user` prompts (including scheduled reports). **May contain secrets and PII**; keep `false` in production unless you are debugging in a safe environment. Default `false`.
 - **`timezone`**: Used when formatting report headers (e.g. `Europe/Madrid`, `UTC`).
 - **`discord.ephemeral_default`**: If `true`, `/summary` and `/note` replies are only visible to the user who ran the command.
@@ -93,6 +108,7 @@ Tune `max_journal_entries` for your Redmine version; some installs create more t
 - **`/note issue_id text`** — Confirms the ticket exists, asks the LLM to polish the text, then appends it as a Redmine journal note. **Requires a whitelisted user id.**
 - **`/token`** — Only in a **DM** with the bot (not in server channels). If you are **already whitelisted**, the bot says so and does **not** issue a new code. Otherwise it issues a random token valid for **5 minutes** and writes a pending request under `ULTRON_STATE_DIR`. A **bot admin** can run **`/approve`** with that token, or an operator on the host can run `ultron add token <token>`.
 - **`/approve token`** — **Admins only** (see below). Consumes a pending token and adds that user’s Discord id to `whitelist.json` (same as the CLI). When you approve **in Discord**, Ultron **DMs the approved user**; **`ultron add token` on the host does not send a DM** (no Discord client in that process).
+- **`/remove user_id`** — **Admins only**. Removes that numeric Discord user id from `whitelist.json` if present; otherwise replies that they were not on the whitelist.
 
 ### Access control (whitelist)
 
@@ -100,7 +116,7 @@ Only Discord user ids stored in `whitelist.json` (under `ULTRON_STATE_DIR`, defa
 
 ### Bot admins
 
-Admins may use **`/approve`** to whitelist users without shell access. An admin is any Discord user id in **`DISCORD_ADMIN_IDS`** and/or **`admins.json`** (same directory as `whitelist.json`, same JSON array-of-integers format as the whitelist). Use the env var for the first admin(s), or create `admins.json` on the server by hand.
+Admins may use **`/approve`** to whitelist users and **`/remove`** to drop a user id from the whitelist, without shell access. An admin is any Discord user id in **`DISCORD_ADMIN_IDS`** and/or **`admins.json`** (same directory as `whitelist.json`, same JSON array-of-integers format as the whitelist). Use the env var for the first admin(s), or create `admins.json` on the server by hand.
 
 **Bootstrap for a new user**
 

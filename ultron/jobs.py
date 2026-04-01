@@ -7,10 +7,11 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from ultron.config import AbandonedSchedule, StaleNewSchedule
-from ultron.llm import LLMClient
+from ultron.llm import LLMBackend, LLMChainExhaustedError
 from ultron.readlog import log_read_payload
 from ultron.redmine import RedmineClient, parse_redmine_datetime
 from ultron.textutil import chunk_discord
+from ultron.workflow_log import wf_exception, wf_info
 
 if TYPE_CHECKING:
     import discord
@@ -32,7 +33,7 @@ def _issue_line(issue: dict) -> str:
 async def run_abandoned_report(
     *,
     redmine: RedmineClient,
-    llm: LLMClient,
+    llm: LLMBackend,
     channel: discord.abc.Messageable | None,
     cfg: AbandonedSchedule,
     timezone_name: str,
@@ -75,13 +76,30 @@ async def run_abandoned_report(
     if log_read_messages:
         log_read_payload(label="report.abandoned.llm_system", text=system)
         log_read_payload(label="report.abandoned.llm_user", text=user)
+    wf_info(
+        logger,
+        "abandoned_report",
+        "FETCH",
+        "open_issues_scanned=%s abandoned_selected=%s prompt_chars=%s",
+        len(issues),
+        len(abandoned),
+        len(user),
+    )
+    wf_info(logger, "abandoned_report", "LLM_CALL", "begin")
     try:
         report = await llm.complete(system=system, user=user)
-    except Exception:
-        logger.exception("LLM failed for abandoned report")
+    except LLMChainExhaustedError:
+        wf_info(logger, "abandoned_report", "ERROR", "all llm_chain providers failed")
+        await channel.send(
+            "**Abandoned tickets report**: All configured language model providers failed (see logs)."
+        )
+        return
+    except Exception as e:
+        wf_exception(logger, "abandoned_report", e)
         await channel.send("**Abandoned tickets report**: LLM request failed (see logs).")
         return
 
+    wf_info(logger, "abandoned_report", "LLM_DONE", "report_chars=%s", len(report))
     header = f"**Abandoned tickets** (no update in ≥{cfg.max_days_without_update} days)\n"
     for part in chunk_discord(header + report):
         await channel.send(part)
@@ -90,7 +108,7 @@ async def run_abandoned_report(
 async def run_stale_new_report(
     *,
     redmine: RedmineClient,
-    llm: LLMClient,
+    llm: LLMBackend,
     channel: discord.abc.Messageable | None,
     cfg: StaleNewSchedule,
     timezone_name: str,
@@ -151,13 +169,30 @@ async def run_stale_new_report(
     if log_read_messages:
         log_read_payload(label="report.stale_new.llm_system", text=system)
         log_read_payload(label="report.stale_new.llm_user", text=user)
+    wf_info(
+        logger,
+        "stale_new_report",
+        "FETCH",
+        "candidates_scanned=%s stale_selected=%s prompt_chars=%s",
+        len(candidates),
+        len(stale),
+        len(user),
+    )
+    wf_info(logger, "stale_new_report", "LLM_CALL", "begin")
     try:
         report = await llm.complete(system=system, user=user)
-    except Exception:
-        logger.exception("LLM failed for stale-new report")
+    except LLMChainExhaustedError:
+        wf_info(logger, "stale_new_report", "ERROR", "all llm_chain providers failed")
+        await channel.send(
+            "**Stale new tickets report**: All configured language model providers failed (see logs)."
+        )
+        return
+    except Exception as e:
+        wf_exception(logger, "stale_new_report", e)
         await channel.send("**Stale new tickets report**: LLM request failed (see logs).")
         return
 
+    wf_info(logger, "stale_new_report", "LLM_DONE", "report_chars=%s", len(report))
     header = (
         f"**Stale new tickets** (≥{cfg.min_age_hours}h old"
         + (", unassigned" if cfg.require_unassigned else "")

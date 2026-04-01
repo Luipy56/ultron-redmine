@@ -197,3 +197,18 @@ def consume_token_add_whitelist(state_dir: Path, token: str) -> int:
         _whitelist_mtime = None
         _whitelist_ids = None
         return uid
+
+
+def remove_user_from_whitelist(state_dir: Path, user_id: int) -> bool:
+    """Remove user_id from whitelist.json if present. Returns True if it was removed."""
+    with state_lock(state_dir):
+        wl_path = state_dir / WHITELIST_FILE
+        ids = read_whitelist_raw(state_dir)
+        if user_id not in ids:
+            return False
+        ids = [x for x in ids if x != user_id]
+        _atomic_write_json(wl_path, ids)
+    global _whitelist_mtime, _whitelist_ids
+    _whitelist_mtime = None
+    _whitelist_ids = None
+    return True

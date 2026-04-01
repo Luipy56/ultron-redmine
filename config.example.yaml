@@ -1,0 +1,46 @@
+# Ultron — example configuration (safe to commit). Copy to config.yaml and fill values.
+# Empty strings and null use built-in defaults at runtime (see ultron/config.py).
+# llm_chain is an ordered list: position 0 = primary, then fallbacks. [] = single client from LLM_* in .env.
+
+timezone: ""
+
+discord:
+  ephemeral_default: null
+  summary_status_redmine: ""
+  summary_status_llm: ""
+  llm_chain_skip_status: ""
+  llm_chain_all_failed_message: ""
+
+reports:
+  channel_id: 0
+
+schedules:
+  abandoned:
+    enabled: null
+    interval_hours: null
+    max_days_without_update: null
+    max_issues: null
+  stale_new:
+    enabled: null
+    interval_hours: null
+    min_age_hours: null
+    require_unassigned: null
+    max_journal_entries: null
+    max_issues: null
+
+logging:
+  log_read_messages: null
+
+llm_chain: []
+
+# Replace [] with one or more mappings (all string fields non-empty except optional name).
+# Optional: name (labels the entry in YAML and logs), timeout_seconds, max_retries.
+# Ollama: base_url http://127.0.0.1:11434/v1, api_key_env pointing to e.g. OLLAMA_API_KEY=ollama in .env, max_retries: 0.
+#
+# llm_chain:
+#   - name: ""
+#     base_url: ""
+#     model: ""
+#     api_key_env: ""
+#     timeout_seconds: null
+#     max_retries: null

@@ -4,8 +4,25 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 # Default HTTP read timeout for LLM calls (15 min). Override with LLM_TIMEOUT_SECONDS.
 _DEFAULT_LLM_TIMEOUT_SECONDS = 900.0
+
+# Placeholder when config.yaml defines llm_chain (real keys come from api_key_env entries).
+_LLM_CHAIN_PLACEHOLDER_KEY = "__llm_chain__"
+
+
+def _config_file_has_llm_chain(config_path: str) -> bool:
+    p = Path(config_path.strip() or "config.yaml")
+    if not p.is_file():
+        return False
+    try:
+        raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return False
+    chain = raw.get("llm_chain")
+    return isinstance(chain, list) and len(chain) > 0
 
 
 @dataclass(frozen=True)
@@ -81,6 +98,8 @@ def load_env() -> EnvSettings:
     if not redmine_key:
         raise RuntimeError("REDMINE_API_KEY is required")
 
+    config_path = os.environ.get("CONFIG_PATH", "config.yaml").strip() or "config.yaml"
+
     ollama_api_base = os.environ.get("OLLAMA_API_BASE", "").strip()
     llm_base = os.environ.get("LLM_BASE_URL", "").strip().rstrip("/")
     if not llm_base and ollama_api_base:
@@ -93,15 +112,19 @@ def load_env() -> EnvSettings:
         llm_key = "ollama"
     if not llm_key and ":11434" in llm_base:
         llm_key = "ollama"
+    if not llm_key and _config_file_has_llm_chain(config_path):
+        llm_key = _LLM_CHAIN_PLACEHOLDER_KEY
     if not llm_key:
-        raise RuntimeError("LLM_API_KEY is required (or set OLLAMA_API_BASE for local Ollama)")
+        raise RuntimeError(
+            "LLM_API_KEY is required (or set OLLAMA_API_BASE for local Ollama, "
+            "or define a non-empty llm_chain in config.yaml)"
+        )
 
     llm_model = os.environ.get("LLM_MODEL", "").strip()
     if not llm_model:
         llm_model = os.environ.get("OLLAMA_MODEL", "").strip()
     if not llm_model:
         llm_model = "gpt-4o-mini"
-    config_path = os.environ.get("CONFIG_PATH", "config.yaml").strip()
 
     state_dir_raw = os.environ.get("ULTRON_STATE_DIR", "data").strip() or "data"
     state_dir = Path(state_dir_raw).expanduser().resolve()

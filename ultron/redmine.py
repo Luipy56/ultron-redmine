@@ -34,6 +34,15 @@ class RedmineClient:
             timeout=self.timeout,
         )
 
+    async def verify_connection(self) -> None:
+        """Lightweight REST check (current user). Raises RedmineError on API/auth failure."""
+        async with self._client() as c:
+            r = await c.get("/users/current.json")
+        if r.status_code == 401:
+            raise RedmineError("Redmine rejected the API key (401 Unauthorized).")
+        if r.is_error:
+            raise RedmineError(f"Redmine connection check failed: {r.status_code} {r.text[:500]}")
+
     async def get_issue(self, issue_id: int, includes: str = "journals,attachments,relations") -> dict[str, Any]:
         async with self._client() as c:
             r = await c.get(f"/issues/{issue_id}.json", params={"include": includes})
