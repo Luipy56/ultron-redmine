@@ -2,9 +2,16 @@
 
 timezone: UTC
 
+logging:
+  # When true, logs full Redmine-derived text, /note input, and LLM prompts (may contain secrets/PII).
+  log_read_messages: true
+
 discord:
-  # Use ephemeral replies for /summary and /note (only visible to the user)
-  ephemeral_default: true
+  # false = bot replies visible to everyone in the channel; true = only the user who ran the command
+  ephemeral_default: false
+  # /summary progress on the deferred message (edit_original_response)
+  # summary_status_redmine: "Fetching ticket from Redmine…"
+  # summary_status_llm: "Delegando en {model}…"   # {model} = LLM_MODEL
 
 reports:
   # Discord channel ID for scheduled reports (integer). Set to 0 to disable posting.

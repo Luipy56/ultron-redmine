@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from ultron.config import AbandonedSchedule, StaleNewSchedule
 from ultron.llm import LLMClient
+from ultron.readlog import log_read_payload
 from ultron.redmine import RedmineClient, parse_redmine_datetime
 from ultron.textutil import chunk_discord
 
@@ -35,6 +36,7 @@ async def run_abandoned_report(
     channel: discord.abc.Messageable | None,
     cfg: AbandonedSchedule,
     timezone_name: str,
+    log_read_messages: bool = False,
 ) -> None:
     if not cfg.enabled or channel is None:
         return
@@ -70,6 +72,9 @@ async def run_abandoned_report(
         "highlight risks, no fluff. Plain text."
     )
     user = f"Report date (server TZ {timezone_name}): {now_local.isoformat()}\n\nIssues:\n{lines}"
+    if log_read_messages:
+        log_read_payload(label="report.abandoned.llm_system", text=system)
+        log_read_payload(label="report.abandoned.llm_user", text=user)
     try:
         report = await llm.complete(system=system, user=user)
     except Exception:
@@ -89,6 +94,7 @@ async def run_stale_new_report(
     channel: discord.abc.Messageable | None,
     cfg: StaleNewSchedule,
     timezone_name: str,
+    log_read_messages: bool = False,
 ) -> None:
     if not cfg.enabled or channel is None:
         return
@@ -114,6 +120,12 @@ async def run_stale_new_report(
         iid = int(iss["id"])
         full = await redmine.get_issue(iid, includes="journals")
         journals = full.get("journals") or []
+        if log_read_messages:
+            subj = str(full.get("subject", ""))
+            log_read_payload(
+                label=f"report.stale_new.inspect issue_id={iid}",
+                text=f"subject={subj!r} journal_count={len(journals)}",
+            )
         if len(journals) > cfg.max_journal_entries:
             continue
         stale.append(iss)
@@ -136,6 +148,9 @@ async def run_stale_new_report(
         "Suggest triage actions. Plain text, concise."
     )
     user = f"Report date (server TZ {timezone_name}): {now_local.isoformat()}\n\nTickets:\n{lines}"
+    if log_read_messages:
+        log_read_payload(label="report.stale_new.llm_system", text=system)
+        log_read_payload(label="report.stale_new.llm_user", text=user)
     try:
         report = await llm.complete(system=system, user=user)
     except Exception:

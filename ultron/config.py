@@ -6,10 +6,15 @@ from typing import Any
 
 import yaml
 
+_DEFAULT_SUMMARY_STATUS_REDMINE = "Fetching ticket from Redmine…"
+_DEFAULT_SUMMARY_STATUS_LLM = "Passing the task to {model}…"
+
 
 @dataclass
 class DiscordConfig:
     ephemeral_default: bool = True
+    summary_status_redmine: str = _DEFAULT_SUMMARY_STATUS_REDMINE
+    summary_status_llm: str = _DEFAULT_SUMMARY_STATUS_LLM
 
 
 @dataclass
@@ -42,11 +47,17 @@ class SchedulesConfig:
 
 
 @dataclass
+class LoggingConfig:
+    log_read_messages: bool = False
+
+
+@dataclass
 class AppConfig:
     timezone: str
     discord: DiscordConfig
     reports: ReportsConfig
     schedules: SchedulesConfig
+    logging: LoggingConfig
 
 
 def _bool(v: Any, default: bool) -> bool:
@@ -61,13 +72,24 @@ def _int(v: Any, default: int) -> int:
     return int(v)
 
 
+def _str(v: Any, default: str) -> str:
+    if v is None:
+        return default
+    s = str(v).strip()
+    return s if s else default
+
+
 def load_config(path: Path) -> AppConfig:
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
     tz = str(raw.get("timezone") or "UTC")
 
     d_raw = raw.get("discord") or {}
-    discord_cfg = DiscordConfig(ephemeral_default=_bool(d_raw.get("ephemeral_default"), True))
+    discord_cfg = DiscordConfig(
+        ephemeral_default=_bool(d_raw.get("ephemeral_default"), True),
+        summary_status_redmine=_str(d_raw.get("summary_status_redmine"), _DEFAULT_SUMMARY_STATUS_REDMINE),
+        summary_status_llm=_str(d_raw.get("summary_status_llm"), _DEFAULT_SUMMARY_STATUS_LLM),
+    )
 
     r_raw = raw.get("reports") or {}
     reports_cfg = ReportsConfig(channel_id=_int(r_raw.get("channel_id"), 0))
@@ -91,9 +113,13 @@ def load_config(path: Path) -> AppConfig:
         max_issues=_int(sn.get("max_issues"), 50),
     )
 
+    l_raw = raw.get("logging") or {}
+    logging_cfg = LoggingConfig(log_read_messages=_bool(l_raw.get("log_read_messages"), False))
+
     return AppConfig(
         timezone=tz,
         discord=discord_cfg,
         reports=reports_cfg,
         schedules=SchedulesConfig(abandoned=abandoned, stale_new=stale_new),
+        logging=logging_cfg,
     )

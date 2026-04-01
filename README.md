@@ -43,6 +43,9 @@ Small **Discord → Redmine → LLM** bot: slash commands for ticket summaries a
 | `LLM_API_KEY` | Yes | API key for the LLM provider (use a dummy value for Ollama if required). |
 | `LLM_BASE_URL` | No | Default `https://api.openai.com/v1`. For Ollama: `http://127.0.0.1:11434/v1`. |
 | `LLM_MODEL` | No | Default `gpt-4o-mini`. |
+| `LLM_TIMEOUT_SECONDS` | No | HTTP timeout for LLM calls (seconds). Default **900** (15 minutes). Increase for large tickets on slow local models; note Discord slash interactions expire sooner. |
+| `LLM_MAX_RETRIES` | No | OpenAI SDK retries per request. Default **0** for Ollama/local, **2** for cloud (avoids doubling wait time on timeouts locally). |
+| `LOG_LEVEL` | No | Root log level (`DEBUG`, `INFO`, …). Default `INFO`. `httpx` / `openai` loggers are capped at `WARNING` to reduce retry noise. |
 | `OLLAMA_API_BASE` | No | If set (and `LLM_BASE_URL` empty), base URL without `/v1` (e.g. `http://127.0.0.1:11434`); Ultron uses `{base}/v1` and defaults `LLM_API_KEY` to `ollama` when unset. |
 | `OLLAMA_MODEL` | No | Used when `LLM_MODEL` is empty. |
 | `DISCORD_GUILD_ID` | No | If set, slash commands sync to this server immediately (handy for development). |
@@ -64,13 +67,16 @@ Small **Discord → Redmine → LLM** bot: slash commands for ticket summaries a
 ## LLM examples
 
 - **OpenAI**: `LLM_BASE_URL=https://api.openai.com/v1`, `LLM_API_KEY=sk-...`, `LLM_MODEL=gpt-4o-mini`
-- **Ollama**: `LLM_BASE_URL=http://127.0.0.1:11434/v1`, `LLM_API_KEY=ollama`, `LLM_MODEL=llama3.2`
+- **Ollama**: `LLM_BASE_URL=http://127.0.0.1:11434/v1`, `LLM_API_KEY=ollama`, `LLM_MODEL=llama3.2`. Default timeout **900s**; override with `LLM_TIMEOUT_SECONDS`. **No SDK retries** by default when Ollama is detected.
 - **OpenRouter**: use their OpenAI-compatible base URL and key from their dashboard.
 
 ## `config.yaml`
 
+- **`logging.log_read_messages`**: If `true`, the `ultron.read` logger records **full** text Ultron ingests: formatted Redmine ticket bodies, the `/note` slash text, and complete LLM `system`/`user` prompts (including scheduled reports). **May contain secrets and PII**; keep `false` in production unless you are debugging in a safe environment. Default `false`.
 - **`timezone`**: Used when formatting report headers (e.g. `Europe/Madrid`, `UTC`).
 - **`discord.ephemeral_default`**: If `true`, `/summary` and `/note` replies are only visible to the user who ran the command.
+- **`discord.summary_status_redmine`**: Status text shown on the deferred `/summary` message while loading the ticket from Redmine (default: `Fetching ticket from Redmine…`).
+- **`discord.summary_status_llm`**: Status text before the LLM call; use `{model}` for the configured model name (default: `Calling {model}…`).
 - **`reports.channel_id`**: Discord integer channel ID for scheduled reports. `0` disables loops (no automatic posts).
 - **`schedules.abandoned`**: Open tickets whose `updated_on` is older than `max_days_without_update` (within the first 100 issues returned by Redmine, sorted by oldest update first).
 - **`schedules.stale_new`**: Open tickets at least `min_age_hours` old, optionally unassigned, with at most `max_journal_entries` journals (fetches each candidate to count journals; capped by `max_issues`).
@@ -98,7 +104,7 @@ Mount or bake `config.yaml` if you do not use the default copy in the image.
 ## Security
 
 - Never commit `.env` or real API keys.
-- Avoid logging ticket bodies at INFO in shared logs.
+- Avoid enabling `logging.log_read_messages` where logs are aggregated or retained; it prints full ticket and note content.
 
 ## License
 

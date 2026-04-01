@@ -11,6 +11,7 @@ class LLMClient:
     api_key: str
     model: str
     timeout: float = 120.0
+    max_retries: int = 2
     _sdk_client: AsyncOpenAI | None = field(default=None, repr=False)
 
     def _sdk(self) -> AsyncOpenAI:
@@ -19,6 +20,7 @@ class LLMClient:
                 base_url=self.base_url,
                 api_key=self.api_key,
                 timeout=self.timeout,
+                max_retries=self.max_retries,
             )
         return self._sdk_client
 
