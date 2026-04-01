@@ -14,6 +14,12 @@ from ultron.jobs import run_abandoned_report, run_stale_new_report
 from ultron.llm import LLMClient
 from ultron.redmine import IssueNotFound, RedmineClient, RedmineError
 from ultron.settings import EnvSettings
+from ultron.state_store import (
+    consume_token_add_whitelist,
+    is_admin,
+    is_user_whitelisted,
+    register_pending_token,
+)
 from ultron.textutil import chunk_discord
 from ultron.workflows import add_formatted_note, summarize_issue
 
@@ -34,6 +40,109 @@ _SESSION_EXPIRED_HINT = (
 _DISCORD_MSG_MAX = 2000
 # Initial /note status (avoid defer "thinking…" when responses are public)
 _NOTE_PROCESSING_TEMPLATE = "Processing note with model {model}…"
+
+_HELP_TEXT = """**Ultron — available slash commands**
+
+**Everyone**
+• `/hello` — Quick connectivity check.
+• `/help` — Show this list.
+• `/token` — Request a one-time approval code (**DM only**). If you are already whitelisted, the bot says so and does not issue a code.
+
+**Whitelisted users**
+• `/summary` `issue_id` — Summarize a Redmine ticket.
+• `/note` `issue_id` `text` — Append an LLM-polished note to a ticket.
+
+**Bot admins only**
+• `/approve` `token` — Approve someone who used `/token` (paste their code)."""
+
+
+def _slash_command_name(interaction: discord.Interaction) -> str | None:
+    if interaction.type is not discord.InteractionType.application_command:
+        return None
+    cmd = interaction.command
+    if cmd is not None and getattr(cmd, "name", None):
+        return str(cmd.name)
+    data = interaction.data
+    if isinstance(data, dict):
+        n = data.get("name")
+        return str(n) if n else None
+    n = getattr(data, "name", None)
+    return str(n) if n else None
+
+
+def _unauthorized_dm_text(owner_contact: str | None) -> str:
+    text = (
+        "You are not authorized to use this bot yet.\n\n"
+        "Run the **`/token`** slash command. It creates a one-time code that is valid for **5 minutes**. "
+        "A bot admin can approve your access.\n\n"
+        "You may need the bot owner to enable your session — contact them to get access."
+    )
+    if owner_contact:
+        text += f"\n\n**Owner contact:** {owner_contact}"
+    return text
+
+
+async def _tree_interaction_check(env: EnvSettings, interaction: discord.Interaction) -> bool:
+    """Global slash guard; must be registered on app_commands.CommandTree (not commands.Bot)."""
+    if interaction.type is not discord.InteractionType.application_command:
+        return True
+    name = _slash_command_name(interaction)
+    if name in ("token", "hello", "help"):
+        return True
+    if name == "approve":
+        if is_admin(env.state_dir, interaction.user.id, env.discord_admin_ids):
+            return True
+        logger.info(
+            "approve denied (not admin) user_id=%s guild_id=%s",
+            interaction.user.id,
+            interaction.guild.id if interaction.guild else None,
+        )
+        try:
+            if interaction.guild is not None:
+                await interaction.response.defer(ephemeral=True, thinking=True)
+                try:
+                    await interaction.delete_original_response()
+                except discord.HTTPException:
+                    await interaction.followup.send("\u200b", ephemeral=True)
+            else:
+                await interaction.response.send_message(
+                    "Only bot admins can use `/approve`.",
+                    ephemeral=True,
+                )
+        except discord.HTTPException as e:
+            logger.warning("approve deny reply failed: %s", e)
+        return False
+    if is_user_whitelisted(env.state_dir, interaction.user.id):
+        return True
+    logger.info(
+        "access denied user_id=%s command=%s guild_id=%s",
+        interaction.user.id,
+        name,
+        interaction.guild.id if interaction.guild else None,
+    )
+    try:
+        await _deny_unauthorized(interaction, env.bot_owner_contact)
+    except discord.HTTPException as e:
+        logger.warning("unauthorized reply failed: %s", e)
+    return False
+
+
+async def _deny_unauthorized(interaction: discord.Interaction, owner_contact: str | None) -> None:
+    """Respond so the user sees nothing in guild channels; explain in DMs."""
+    if interaction.guild is not None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await interaction.delete_original_response()
+        except discord.HTTPException:
+            try:
+                await interaction.followup.send("\u200b", ephemeral=True)
+            except discord.HTTPException as e:
+                logger.warning("silent deny followup failed: %s", e)
+    else:
+        await interaction.response.send_message(
+            _unauthorized_dm_text(owner_contact),
+            ephemeral=True,
+        )
 
 
 def _trunc(text: str) -> str:
@@ -120,6 +229,14 @@ async def _edit_or_followup(
             raise
 
 
+class UltronCommandTree(app_commands.CommandTree):
+    """discord.py invokes interaction_check on CommandTree only, not on commands.Bot."""
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        bot = self.client
+        return await _tree_interaction_check(bot.env, interaction)  # type: ignore[attr-defined]
+
+
 class UltronBot(commands.Bot):
     def __init__(
         self,
@@ -132,7 +249,12 @@ class UltronBot(commands.Bot):
         # Slash + scheduled posts only; no Message Content intent.
         intents = discord.Intents.none()
         intents.guilds = True
-        super().__init__(command_prefix=None, intents=intents, help_command=None)
+        super().__init__(
+            command_prefix=None,
+            intents=intents,
+            help_command=None,
+            tree_cls=UltronCommandTree,
+        )
         self.env = env
         self.app_cfg = app_cfg
         self.redmine = redmine
@@ -141,6 +263,73 @@ class UltronBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         guild = discord.Object(id=self.env.discord_guild_id) if self.env.discord_guild_id else None
+
+        @self.tree.command(name="token", description="Get a one-time token so an operator can whitelist you")
+        async def token_cmd(interaction: discord.Interaction) -> None:
+            if interaction.guild is not None:
+                await interaction.response.send_message(
+                    "**Error:** You cannot run `/token` in a server channel. "
+                    "Open a direct message (DM) with the bot and use the command there.",
+                    ephemeral=True,
+                )
+                return
+            if is_user_whitelisted(self.env.state_dir, interaction.user.id):
+                await interaction.response.send_message(
+                    "You are already approved. You can use **`/summary`** and **`/note`** — you do not need a new token.",
+                    ephemeral=True,
+                )
+                return
+            tok = register_pending_token(self.env.state_dir, interaction.user.id)
+            body = (
+                f"Your approval token (valid **5 minutes**):\n`{tok}`\n\n"
+                "Send this code to a bot admin so they can approve you.\n\n"
+                "You may still need the bot owner to OK your access for this session — contact them if needed."
+            )
+            await interaction.response.send_message(body, ephemeral=True)
+
+        @self.tree.command(name="hello", description="Simple connectivity check")
+        async def hello_cmd(interaction: discord.Interaction) -> None:
+            await interaction.response.send_message("hello world")
+
+        @self.tree.command(name="help", description="List available commands")
+        async def help_cmd(interaction: discord.Interaction) -> None:
+            await interaction.response.send_message(_HELP_TEXT, ephemeral=True)
+
+        @self.tree.command(name="approve", description="Approve a pending user token (admins only)")
+        @app_commands.describe(token="Token from the user's /token command")
+        async def approve_cmd(interaction: discord.Interaction, token: str) -> None:
+            try:
+                uid = consume_token_add_whitelist(self.env.state_dir, token)
+            except ValueError as e:
+                await interaction.response.send_message(str(e).capitalize() + ".", ephemeral=True)
+                return
+            await interaction.response.send_message(
+                f"Whitelisted Discord user id **{uid}**.",
+                ephemeral=True,
+            )
+            cmd_log.info(
+                "command=approve actor_id=%s approved_user_id=%s",
+                interaction.user.id,
+                uid,
+            )
+            target = interaction.client.get_user(uid)
+            if target is None:
+                try:
+                    target = await interaction.client.fetch_user(uid)
+                except discord.NotFound:
+                    logger.warning("approve: user_id=%s not found for DM notification", uid)
+                    target = None
+            if target is not None:
+                try:
+                    await target.send(
+                        "Your access request has been approved. You can now use **`/summary`** and **`/note`** with this bot.",
+                    )
+                except discord.HTTPException as e:
+                    logger.warning(
+                        "approve: DM to user_id=%s failed (user may have DMs closed): %s",
+                        uid,
+                        e,
+                    )
 
         @self.tree.command(name="summary", description="Summarize a Redmine ticket")
         @app_commands.describe(issue_id="Redmine issue number")

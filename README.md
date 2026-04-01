@@ -51,6 +51,9 @@ Small **Discord → Redmine → LLM** bot: slash commands for ticket summaries a
 | `DISCORD_GUILD_ID` | No | If set, slash commands sync to this server immediately (handy for development). |
 | `DISCORD_APPLICATION_ID` | No | Optional; not required for the gateway bot. |
 | `CONFIG_PATH` | No | Path to `config.yaml` (default `./config.yaml`). |
+| `ULTRON_STATE_DIR` | No | Directory for **whitelist**, **admins**, and **pending `/token` data** (default `./data`). Not committed to git; use an absolute path in production if the working directory changes. |
+| `BOT_OWNER_CONTACT` | No | Optional line (e.g. email or handle) appended to the English DM sent to users who are not whitelisted yet. |
+| `DISCORD_ADMIN_IDS` | No | Comma- or space-separated Discord user IDs that are **bot admins** (may use **`/approve`**). Merged with `admins.json` in `ULTRON_STATE_DIR`. |
 
 ## Discord checklist
 
@@ -85,8 +88,33 @@ Tune `max_journal_entries` for your Redmine version; some installs create more t
 
 ## Slash commands
 
-- **`/summary issue_id`** — Loads the ticket (description + recent journals), sends context to the LLM, returns a summary.
-- **`/note issue_id text`** — Confirms the ticket exists, asks the LLM to polish the text, then appends it as a Redmine journal note.
+- **`/help`** — Lists all slash commands and who may use them (ephemeral). Available to everyone.
+- **`/summary issue_id`** — Loads the ticket (description + recent journals), sends context to the LLM, returns a summary. **Requires a whitelisted Discord user id.**
+- **`/note issue_id text`** — Confirms the ticket exists, asks the LLM to polish the text, then appends it as a Redmine journal note. **Requires a whitelisted user id.**
+- **`/token`** — Only in a **DM** with the bot (not in server channels). If you are **already whitelisted**, the bot says so and does **not** issue a new code. Otherwise it issues a random token valid for **5 minutes** and writes a pending request under `ULTRON_STATE_DIR`. A **bot admin** can run **`/approve`** with that token, or an operator on the host can run `ultron add token <token>`.
+- **`/approve token`** — **Admins only** (see below). Consumes a pending token and adds that user’s Discord id to `whitelist.json` (same as the CLI). When you approve **in Discord**, Ultron **DMs the approved user**; **`ultron add token` on the host does not send a DM** (no Discord client in that process).
+
+### Access control (whitelist)
+
+Only Discord user ids stored in `whitelist.json` (under `ULTRON_STATE_DIR`, default `./data`) may use **`/summary`** and **`/note`**. That directory is listed in `.gitignore`; keep it on the server only.
+
+### Bot admins
+
+Admins may use **`/approve`** to whitelist users without shell access. An admin is any Discord user id in **`DISCORD_ADMIN_IDS`** and/or **`admins.json`** (same directory as `whitelist.json`, same JSON array-of-integers format as the whitelist). Use the env var for the first admin(s), or create `admins.json` on the server by hand.
+
+**Bootstrap for a new user**
+
+1. The user opens a **DM** with the bot and runs **`/token`** (reply is ephemeral), then sends the token to a bot admin (or to someone with host access).
+2. **Option A — Discord:** an admin runs **`/approve`**, pastes the token into the `token` option.
+3. **Option B — host:** on the machine where Ultron runs (same `.env` / `ULTRON_STATE_DIR` as the bot):
+
+   ```bash
+   ultron add token '<paste-token-here>'
+   ```
+
+4. The user may still need the **bot owner** to OK access organizationally; the bot mentions this in DMs when access is denied.
+
+If a non-whitelisted user invokes **`/summary`** or **`/note`** in a **server channel**, Ultron removes the visible reply so others see nothing. In **DM**, they get a short English message about **`/token`**, asking a bot admin, and contacting the owner. Optional **`BOT_OWNER_CONTACT`** is appended when set.
 
 ### Long notes (Discord limit)
 
@@ -104,6 +132,7 @@ Mount or bake `config.yaml` if you do not use the default copy in the image.
 ## Security
 
 - Never commit `.env` or real API keys.
+- Do not commit `ULTRON_STATE_DIR` contents (`whitelist.json`, `admins.json`, `pending_tokens.json`); they identify who may use the bot, who can approve users, and hold short-lived approval tokens.
 - Avoid enabling `logging.log_read_messages` where logs are aggregated or retained; it prints full ticket and note content.
 
 ## License

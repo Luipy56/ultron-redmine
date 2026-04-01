@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import os
@@ -44,6 +45,18 @@ def _configure_logging() -> None:
 
 def main() -> None:
     load_dotenv()
+    parser = argparse.ArgumentParser(prog="ultron")
+    sub = parser.add_subparsers(dest="cmd")
+    p_add = sub.add_parser("add", help="Operator commands (run on the bot host)")
+    add_sub = p_add.add_subparsers(dest="add_cmd", required=True)
+    p_tok = add_sub.add_parser("token", help="Approve a user using the token from /token")
+    p_tok.add_argument("token", help="Token string")
+    args = parser.parse_args()
+    if args.cmd == "add" and args.add_cmd == "token":
+        from ultron.cli import cmd_add_token
+
+        raise SystemExit(cmd_add_token(args.token))
+
     _configure_logging()
     try:
         asyncio.run(_run())

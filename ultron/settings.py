@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 # Default HTTP read timeout for LLM calls (15 min). Override with LLM_TIMEOUT_SECONDS.
 _DEFAULT_LLM_TIMEOUT_SECONDS = 900.0
@@ -20,6 +21,9 @@ class EnvSettings:
     llm_timeout_seconds: float
     llm_max_retries: int
     config_path: str
+    state_dir: Path
+    bot_owner_contact: str | None
+    discord_admin_ids: frozenset[int]
 
 
 def _opt_int(name: str) -> int | None:
@@ -34,6 +38,22 @@ def _opt_float(name: str) -> float | None:
     if not v:
         return None
     return float(v)
+
+
+def _parse_discord_admin_ids() -> frozenset[int]:
+    raw = os.environ.get("DISCORD_ADMIN_IDS", "").strip()
+    if not raw:
+        return frozenset()
+    out: list[int] = []
+    for part in raw.replace(",", " ").split():
+        p = part.strip()
+        if not p:
+            continue
+        try:
+            out.append(int(p))
+        except ValueError:
+            continue
+    return frozenset(out)
 
 
 def _is_local_ollama(llm_base: str, ollama_api_base_raw: str) -> bool:
@@ -83,6 +103,11 @@ def load_env() -> EnvSettings:
         llm_model = "gpt-4o-mini"
     config_path = os.environ.get("CONFIG_PATH", "config.yaml").strip()
 
+    state_dir_raw = os.environ.get("ULTRON_STATE_DIR", "data").strip() or "data"
+    state_dir = Path(state_dir_raw).expanduser().resolve()
+
+    bot_owner_contact = os.environ.get("BOT_OWNER_CONTACT", "").strip() or None
+
     ollama_raw = os.environ.get("OLLAMA_API_BASE", "")
     local_ollama = _is_local_ollama(llm_base, ollama_raw)
     timeout_override = _opt_float("LLM_TIMEOUT_SECONDS")
@@ -108,4 +133,7 @@ def load_env() -> EnvSettings:
         llm_timeout_seconds=llm_timeout,
         llm_max_retries=llm_max_retries,
         config_path=config_path,
+        state_dir=state_dir,
+        bot_owner_contact=bot_owner_contact,
+        discord_admin_ids=_parse_discord_admin_ids(),
     )
