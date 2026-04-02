@@ -4,6 +4,7 @@ import logging
 import time
 import traceback
 from collections.abc import Awaitable, Callable
+from urllib.parse import urlparse
 
 import discord
 import httpx
@@ -57,13 +58,15 @@ _HELP_TEXT = """**Ultron — available slash commands**
 • `/token` — Request a one-time approval code (**DM only**). If you are already whitelisted, the bot says so and does not issue a code.
 
 **Whitelisted users**
-• `/hello` — Quick check (whitelisted only); in servers the reply is **visible in the channel**. If not authorized, same as `/summary` / `/note`.
+• `/ping` — Quick check (whitelisted only); in servers the reply is **visible in the channel**. If not authorized, same as `/summary` / `/note`.
+• `/status` — Placeholder (reserved for future health info).
 • `/summary` `issue_id` — Summarize a Redmine ticket.
 • `/note` `issue_id` `text` — Append an LLM-polished note to a ticket.
 
 **Bot admins only**
 • `/approve` `token` — Approve someone who used `/token` (paste their code).
-• `/remove` `user_id` — Remove a Discord user id from the whitelist."""
+• `/remove` `user_id` — Remove a Discord user id from the whitelist.
+• `/show_config` — Show important non-secret settings (**ephemeral** only)."""
 
 
 def _slash_command_name(interaction: discord.Interaction) -> str | None:
@@ -197,6 +200,50 @@ def _unauthorized_dm_text(owner_contact: str | None) -> str:
     return text
 
 
+def _format_show_config(app_cfg: AppConfig, env: EnvSettings) -> str:
+    """Redacted summary for `/show_config` (no API keys or secrets)."""
+    ru = urlparse(env.redmine_url)
+    redmine_host = ru.netloc or env.redmine_url
+    lines: list[str] = [
+        "**Configuration (redacted)**",
+        f"• **timezone:** {app_cfg.timezone}",
+        f"• **CONFIG_PATH:** `{env.config_path}`",
+        f"• **ULTRON_STATE_DIR:** `{env.state_dir}`",
+        f"• **redmine host:** {redmine_host}",
+        f"• **discord.ephemeral_default:** {app_cfg.discord.ephemeral_default}",
+        f"• **reports.channel_id:** {app_cfg.reports.channel_id}",
+        f"• **logging.log_read_messages:** {app_cfg.logging.log_read_messages}",
+    ]
+    ab = app_cfg.schedules.abandoned
+    sn = app_cfg.schedules.stale_new
+    lines.append(
+        f"• **schedules.abandoned:** enabled={ab.enabled} interval_h={ab.interval_hours} "
+        f"max_days={ab.max_days_without_update} max_issues={ab.max_issues}"
+    )
+    lines.append(
+        f"• **schedules.stale_new:** enabled={sn.enabled} interval_h={sn.interval_hours} "
+        f"min_age_h={sn.min_age_hours} require_unassigned={sn.require_unassigned} "
+        f"max_journal_entries={sn.max_journal_entries} max_issues={sn.max_issues}"
+    )
+    dc = app_cfg.discord
+    lines.append(f"• **discord.summary_status_redmine:** {_trunc(dc.summary_status_redmine)}")
+    lines.append(f"• **discord.summary_status_llm:** {_trunc(dc.summary_status_llm)}")
+    lines.append(f"• **discord.llm_chain_skip_status:** {_trunc(dc.llm_chain_skip_status)}")
+    lines.append(f"• **discord.llm_chain_all_failed_message:** {_trunc(dc.llm_chain_all_failed_message)}")
+    if app_cfg.llm_chain:
+        lines.append("• **llm_chain:**")
+        for i, spec in enumerate(app_cfg.llm_chain):
+            label = spec.name or f"entry[{i}]"
+            lines.append(
+                f"  – {label}: `{spec.base_url}` / model `{spec.model}` / key env `{spec.api_key_env}`"
+            )
+    else:
+        lines.append("• **llm:** single provider from environment (not `llm_chain`)")
+        lines.append(f"  – `LLM_BASE_URL` (effective): `{env.llm_base_url}`")
+        lines.append(f"  – `LLM_MODEL` (effective): `{env.llm_model}`")
+    return "\n".join(lines)
+
+
 async def _tree_interaction_check(env: EnvSettings, interaction: discord.Interaction) -> bool:
     """Global slash guard; must be registered on app_commands.CommandTree (not commands.Bot)."""
     if interaction.type is not discord.InteractionType.application_command:
@@ -204,17 +251,17 @@ async def _tree_interaction_check(env: EnvSettings, interaction: discord.Interac
     name = _slash_command_name(interaction)
     if name in ("token", "help"):
         return True
-    if name == "hello":
+    if name == "ping":
         if is_user_whitelisted(env.state_dir, interaction.user.id):
             return True
-        log_slash_input("hello", interaction)
-        log_slash_denied("hello", interaction, reason="not whitelisted")
+        log_slash_input("ping", interaction)
+        log_slash_denied("ping", interaction, reason="not whitelisted")
         try:
-            await _deny_unauthorized(interaction, env.bot_owner_contact, command="hello")
+            await _deny_unauthorized(interaction, env.bot_owner_contact, command="ping")
         except discord.HTTPException as e:
-            logger.warning("hello unauthorized reply failed: %s", e)
+            logger.warning("ping unauthorized reply failed: %s", e)
         return False
-    if name in ("approve", "remove"):
+    if name in ("approve", "remove", "show_config"):
         if is_admin(env.state_dir, interaction.user.id, env.discord_admin_ids):
             return True
         log_slash_input(name, interaction)
@@ -495,27 +542,39 @@ class UltronBot(commands.Bot):
                 fields=f"token_len={len(tok)}",
             )
 
-        @self.tree.command(name="hello", description="Simple connectivity check")
-        async def hello_cmd(interaction: discord.Interaction) -> None:
-            _hello_reply = "hello world"
-            log_slash_input("hello", interaction)
+        @self.tree.command(name="ping", description="Simple connectivity check (replies Pong)")
+        async def ping_cmd(interaction: discord.Interaction) -> None:
+            _ping_reply = "Pong"
+            log_slash_input("ping", interaction)
             try:
                 # Defer + followup so the reply is a normal channel-visible webhook message, not “only you” in servers.
                 await interaction.response.defer(ephemeral=False)
-                await interaction.followup.send(_hello_reply, ephemeral=False)
+                await interaction.followup.send(_ping_reply, ephemeral=False)
             except discord.HTTPException as e:
                 log_slash_error(
-                    "hello",
+                    "ping",
                     interaction,
                     action="defer or followup failed",
                     detail=e,
                 )
                 raise
             log_slash_output(
-                "hello",
+                "ping",
                 interaction,
                 action="defer + public followup posted to channel",
-                fields=f"reply={_hello_reply!r}",
+                fields=f"reply={_ping_reply!r}",
+            )
+
+        @self.tree.command(name="status", description="Bot status (placeholder)")
+        async def status_cmd(interaction: discord.Interaction) -> None:
+            ephemeral = self.app_cfg.discord.ephemeral_default
+            log_slash_input("status", interaction, fields=f"ephemeral={ephemeral}")
+            await interaction.response.send_message("Status: OK (placeholder).", ephemeral=ephemeral)
+            log_slash_output(
+                "status",
+                interaction,
+                action="sent status placeholder",
+                fields=f"ephemeral={ephemeral}",
             )
 
         @self.tree.command(name="help", description="List available commands")
@@ -607,6 +666,16 @@ class UltronBot(commands.Bot):
                     action="sent ephemeral (target was not whitelisted)",
                     fields=f"user_id={user_id}",
                 )
+
+        @self.tree.command(name="show_config", description="Show important bot configuration (admins only, ephemeral)")
+        async def show_config_cmd(interaction: discord.Interaction) -> None:
+            log_slash_input("show_config", interaction)
+            body = _format_show_config(self.app_cfg, self.env)
+            chunks = chunk_discord(body, limit=1900)
+            await interaction.response.send_message(chunks[0], ephemeral=True)
+            for part in chunks[1:]:
+                await interaction.followup.send(part, ephemeral=True)
+            log_slash_output("show_config", interaction, action="sent ephemeral config summary")
 
         @self.tree.command(name="summary", description="Summarize a Redmine ticket")
         @app_commands.describe(issue_id="Redmine issue number")

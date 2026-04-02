@@ -34,11 +34,13 @@ logging:
 llm_chain: []
 
 # Replace [] with one or more mappings (all string fields non-empty except optional name).
+# Optional: enabled (default true) — set false to omit that provider from the chain without deleting the block.
 # Optional: name (labels the entry in YAML and logs), timeout_seconds, max_retries.
 # Ollama: base_url http://127.0.0.1:11434/v1, api_key_env pointing to e.g. OLLAMA_API_KEY=ollama in .env, max_retries: 0.
 #
 # llm_chain:
 #   - name: ""
+#     enabled: true
 #     base_url: ""
 #     model: ""
 #     api_key_env: ""

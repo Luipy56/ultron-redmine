@@ -76,6 +76,7 @@ class LLMProviderSpec:
     timeout_seconds: float
     max_retries: int
     name: str | None = None
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,8 @@ def _parse_llm_chain(raw: Any) -> tuple[LLMProviderSpec, ...] | None:
     for i, item in enumerate(raw):
         if not isinstance(item, dict):
             raise ValueError(f"llm_chain[{i}] must be a mapping")
+        if not _bool(item.get("enabled"), True):
+            continue
         base_url = _str(item.get("base_url"), "").strip().rstrip("/")
         if not base_url:
             raise ValueError(f"llm_chain[{i}].base_url is required")
@@ -170,8 +173,11 @@ def _parse_llm_chain(raw: Any) -> tuple[LLMProviderSpec, ...] | None:
                 timeout_seconds=timeout_seconds,
                 max_retries=max_retries,
                 name=entry_name,
+                enabled=True,
             )
         )
+    if not out:
+        return None
     return tuple(out)
 
 

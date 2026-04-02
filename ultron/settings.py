@@ -4,8 +4,6 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
-
 # Default HTTP read timeout for LLM calls (15 min). Override with LLM_TIMEOUT_SECONDS.
 _DEFAULT_LLM_TIMEOUT_SECONDS = 900.0
 
@@ -14,15 +12,16 @@ _LLM_CHAIN_PLACEHOLDER_KEY = "__llm_chain__"
 
 
 def _config_file_has_llm_chain(config_path: str) -> bool:
+    """True when the config file parses and has at least one enabled `llm_chain` entry."""
     p = Path(config_path.strip() or "config.yaml")
     if not p.is_file():
         return False
     try:
-        raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        from ultron.config import load_config
+
+        return load_config(p).llm_chain is not None
     except Exception:
         return False
-    chain = raw.get("llm_chain")
-    return isinstance(chain, list) and len(chain) > 0
 
 
 @dataclass(frozen=True)

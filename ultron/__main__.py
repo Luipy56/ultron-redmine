@@ -12,6 +12,20 @@ import httpx
 from dotenv import load_dotenv
 
 
+def _load_dotenv() -> None:
+    """Load `.env` from the repository root (directory that contains the `ultron` package).
+
+    `load_dotenv()` without a path only searches upward from the current working directory,
+    so secrets are missing when the bot is started from another cwd (systemd, cron, etc.).
+    """
+    root = Path(__file__).resolve().parent.parent
+    env_path = root / ".env"
+    if env_path.is_file():
+        load_dotenv(env_path)
+    else:
+        load_dotenv()
+
+
 class _SlashPhaseMixin:
     """Inject %(slash_phase_colored)s for LogRecords with extra slash_phase=INPUT|OUTPUT|ERROR|DENIED."""
 
@@ -89,7 +103,7 @@ def _configure_logging() -> None:
 
 
 def main() -> None:
-    load_dotenv()
+    _load_dotenv()
     parser = argparse.ArgumentParser(prog="ultron")
     sub = parser.add_subparsers(dest="cmd")
     p_add = sub.add_parser("add", help="Operator commands (run on the bot host)")
