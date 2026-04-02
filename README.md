@@ -39,7 +39,7 @@ A **Discord** bot that connects **Redmine** to an **OpenAI-compatible** LLM (Ope
 ## Quick start
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Luipy56/ultron-redmine.git
 cd ultron-redmine
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
@@ -51,8 +51,6 @@ python -m ultron              # or: ultron
 1. **Environment:** copy [`.env.example`](.env.example) → `.env` and fill required values (Discord, Redmine, LLM). The file documents the rest.
 2. **YAML config:** copy [`config.example.yaml`](config.example.yaml) → `config.yaml`. It documents `llm_chain`, reports (`reports`, `schedules`), Discord copy, and logging.
 3. **Discord:** invite the bot with `applications.commands` and permission to post in the reports channel if you use scheduled reports.
-
-For slash commands that update immediately during development, set `DISCORD_GUILD_ID` in `.env`.
 
 ---
 
@@ -82,32 +80,6 @@ The image bakes a template from `config.example.yaml` as `/app/config.yaml`. Mou
 
 ---
 
-## Security (summary)
-
-Do not commit **`.env`**, **`config.yaml`**, or state directories (`whitelist`, admins, pending tokens). Avoid `logging.log_read_messages: true` in production unless logs stay local and trusted.
-
----
-
-## CI and deploy (`prod` branch)
-
-In **GitHub → Settings → Secrets and variables → Actions → New repository secret**, add:
-
-| Secret | Purpose |
-|--------|---------|
-| `SSH_PRIVATE_KEY` | **Private** deploy key (ed25519 or RSA), PEM block as stored by GitHub. |
-| `SSH_KNOWN_HOSTS` | Output of `ssh-keyscan` against your server (or IP) for host verification. |
-| `DEPLOY_USER` | SSH user (e.g. `luipy`). |
-| `DEPLOY_HOST` | Host to connect to (in Actions use a **FQDN or IP** resolvable from GitHub runners). |
-| `HOST_PORT` | SSH port (e.g. `2222`). Optional: if unset or empty, **22** is used. |
-
-For **`SSH_KNOWN_HOSTS`**, if SSH is not on port 22, generate entries with the same port, e.g. `ssh-keyscan -p 2222 your-server-or-ip`.
-
-On the **server** (e.g. `amvara4`), add the matching **public** key to the deploy user’s `~/.ssh/authorized_keys`. Restrict the key if you like (`command=`, `no-port-forwarding`, etc.).
-
-The **`.github/workflows/ci.yml`** workflow runs: **pytest** → **Docker build** → on **push to `prod`**, `rsync` to `/home/luipy/ultron/` (excludes `.git`, `.env`, `data`) and `pip install -e .` in the server `venv`. **Restart the bot** after deploy if you use systemd or similar (not automated to avoid requiring passwordless `sudo` without your setup).
-
----
-
 ## License
 
-Use and adapt for your team.
+This project is released under the [MIT License](LICENSE).
