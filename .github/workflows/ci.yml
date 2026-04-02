@@ -51,9 +51,11 @@ jobs:
         env:
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          HOST_PORT: ${{ secrets.HOST_PORT }}
         run: |
           set -eux
-          rsync -avz --delete \
+          SSH_PORT="${HOST_PORT:-22}"
+          rsync -avz -e "ssh -p ${SSH_PORT} -o StrictHostKeyChecking=yes" --delete \
             --exclude '.git' \
             --exclude '.env' \
             --exclude 'data' \
@@ -65,6 +67,8 @@ jobs:
         env:
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          HOST_PORT: ${{ secrets.HOST_PORT }}
         run: |
-          ssh -o StrictHostKeyChecking=yes "${DEPLOY_USER}@${DEPLOY_HOST}" \
+          SSH_PORT="${HOST_PORT:-22}"
+          ssh -p "${SSH_PORT}" -o StrictHostKeyChecking=yes "${DEPLOY_USER}@${DEPLOY_HOST}" \
             'set -e; cd /home/luipy/ultron; test -d .venv || python3 -m venv .venv; .venv/bin/pip install -U pip -q; .venv/bin/pip install -q -e .'
