@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -75,8 +75,92 @@ class RedmineClient:
         data = r.json()
         return list(data.get("issues", []))
 
+    async def list_issue_statuses(self) -> list[dict[str, Any]]:
+        async with self._client() as c:
+            r = await c.get("/issue_statuses.json")
+        if r.is_error:
+            raise RedmineError(f"Redmine list statuses failed: {r.status_code} {r.text[:500]}")
+        return list(r.json().get("issue_statuses", []))
+
+    async def list_issues(
+        self,
+        *,
+        status_id: int,
+        sort: str = "created_on:asc",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        lim = min(max(1, limit), 100)
+        off = max(0, offset)
+        async with self._client() as c:
+            r = await c.get(
+                "/issues.json",
+                params={
+                    "status_id": status_id,
+                    "sort": sort,
+                    "limit": lim,
+                    "offset": off,
+                },
+            )
+        if r.is_error:
+            raise RedmineError(f"Redmine list issues failed: {r.status_code} {r.text[:500]}")
+        return list(r.json().get("issues", []))
+
+    async def list_issues_older_than_days(
+        self,
+        *,
+        status_id: int,
+        min_age_days: int,
+        max_fetched: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Issues in `status_id` with `created_on` at least `min_age_days` in the past (UTC).
+
+        Paginates `/issues.json` until a short page or `max_fetched` issues scanned.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(days=min_age_days)
+        matched: list[dict[str, Any]] = []
+        offset = 0
+        scanned = 0
+        while True:
+            page = await self.list_issues(
+                status_id=status_id,
+                sort="created_on:asc",
+                limit=100,
+                offset=offset,
+            )
+            if not page:
+                break
+            for iss in page:
+                scanned += 1
+                if scanned > max_fetched:
+                    break
+                created = parse_redmine_datetime(iss.get("created_on"))
+                if created is None:
+                    continue
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                if created <= cutoff:
+                    matched.append(iss)
+            if scanned > max_fetched:
+                break
+            if len(page) < 100:
+                break
+            offset += len(page)
+        return matched
+
     def issue_url(self, issue_id: int) -> str:
         return f"{self.base_url}/issues/{issue_id}"
+
+
+async def resolve_status_id_by_name(client: RedmineClient, name: str) -> int | None:
+    """Return Redmine `issue_statuses.id` whose `name` equals `name` after strip (exact match)."""
+    want = name.strip()
+    if not want:
+        return None
+    for s in await client.list_issue_statuses():
+        if (s.get("name") or "").strip() == want:
+            return int(s["id"])
+    return None
 
 
 def parse_redmine_datetime(value: str | None) -> datetime | None:

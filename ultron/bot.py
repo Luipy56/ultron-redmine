@@ -15,7 +15,7 @@ from openai import APITimeoutError
 from ultron.config import AppConfig
 from ultron.jobs import run_abandoned_report, run_stale_new_report
 from ultron.llm import ChainSkipNotice, LLMBackend, LLMChainExhaustedError, safe_exc_message
-from ultron.redmine import IssueNotFound, RedmineClient, RedmineError
+from ultron.redmine import IssueNotFound, RedmineClient, RedmineError, resolve_status_id_by_name
 from ultron.settings import EnvSettings
 from ultron.state_store import (
     consume_token_add_whitelist,
@@ -45,6 +45,9 @@ _DISCORD_MSG_MAX = 2000
 # Initial /note status (avoid defer "thinking…" when responses are public)
 _NOTE_PROCESSING_TEMPLATE = "Processing note with model {model}…"
 
+# Reserved slash names for development; distinct descriptions until renamed (whitelist-gated like /ping).
+_DEV_PLACEHOLDER_SLOTS: frozenset[str] = frozenset(f"dev_slot_{i}" for i in range(2, 11))
+
 
 def _discord_note_author_label(user: discord.User) -> str:
     """Display name for the Redmine note header (`_name_`); uses guild nickname when applicable."""
@@ -60,13 +63,17 @@ _HELP_TEXT = """**Ultron — available slash commands**
 **Whitelisted users**
 • `/ping` — Quick check (whitelisted only); in servers the reply is **visible in the channel**. If not authorized, same as `/summary` / `/note`.
 • `/status` — Placeholder (reserved for future health info).
+• `/new_issues` — List issues in the configured “new” Redmine status, created at least **M** days ago (see `config.yaml`).
 • `/summary` `issue_id` — Summarize a Redmine ticket.
 • `/note` `issue_id` `text` — Append an LLM-polished note to a ticket.
 
 **Bot admins only**
 • `/approve` `token` — Approve someone who used `/token` (paste their code).
 • `/remove` `user_id` — Remove a Discord user id from the whitelist.
-• `/show_config` — Show important non-secret settings (**ephemeral** only)."""
+• `/show_config` — Show important non-secret settings (**ephemeral** only).
+
+**Whitelisted — dev placeholders**
+• `/dev_slot_2` … `/dev_slot_10` — Empty stubs; tell them apart via **each command’s description** in Discord until we rename them."""
 
 
 def _slash_command_name(interaction: discord.Interaction) -> str | None:
@@ -204,6 +211,7 @@ def _format_show_config(app_cfg: AppConfig, env: EnvSettings) -> str:
     """Redacted summary for `/show_config` (no API keys or secrets)."""
     ru = urlparse(env.redmine_url)
     redmine_host = ru.netloc or env.redmine_url
+    ni = app_cfg.discord.new_issues
     lines: list[str] = [
         "**Configuration (redacted)**",
         f"• **timezone:** {app_cfg.timezone}",
@@ -211,6 +219,8 @@ def _format_show_config(app_cfg: AppConfig, env: EnvSettings) -> str:
         f"• **ULTRON_STATE_DIR:** `{env.state_dir}`",
         f"• **redmine host:** {redmine_host}",
         f"• **discord.ephemeral_default:** {app_cfg.discord.ephemeral_default}",
+        f"• **discord.new_issues:** status_name={ni.status_name!r} list_limit={ni.list_limit} "
+        f"min_age_days={ni.min_age_days}",
         f"• **reports.channel_id:** {app_cfg.reports.channel_id}",
         f"• **logging.log_read_messages:** {app_cfg.logging.log_read_messages}",
     ]
@@ -225,22 +235,14 @@ def _format_show_config(app_cfg: AppConfig, env: EnvSettings) -> str:
         f"min_age_h={sn.min_age_hours} require_unassigned={sn.require_unassigned} "
         f"max_journal_entries={sn.max_journal_entries} max_issues={sn.max_issues}"
     )
-    dc = app_cfg.discord
-    lines.append(f"• **discord.summary_status_redmine:** {_trunc(dc.summary_status_redmine)}")
-    lines.append(f"• **discord.summary_status_llm:** {_trunc(dc.summary_status_llm)}")
-    lines.append(f"• **discord.llm_chain_skip_status:** {_trunc(dc.llm_chain_skip_status)}")
-    lines.append(f"• **discord.llm_chain_all_failed_message:** {_trunc(dc.llm_chain_all_failed_message)}")
     if app_cfg.llm_chain:
         lines.append("• **llm_chain:**")
         for i, spec in enumerate(app_cfg.llm_chain):
             label = spec.name or f"entry[{i}]"
-            lines.append(
-                f"  – {label}: `{spec.base_url}` / model `{spec.model}` / key env `{spec.api_key_env}`"
-            )
+            lines.append(f"  – {label}: `{spec.base_url}` / model `{spec.model}`")
     else:
         lines.append("• **llm:** single provider from environment (not `llm_chain`)")
-        lines.append(f"  – `LLM_BASE_URL` (effective): `{env.llm_base_url}`")
-        lines.append(f"  – `LLM_MODEL` (effective): `{env.llm_model}`")
+        lines.append(f"  – `{env.llm_base_url}` / model `{env.llm_model}`")
     return "\n".join(lines)
 
 
@@ -260,6 +262,16 @@ async def _tree_interaction_check(env: EnvSettings, interaction: discord.Interac
             await _deny_unauthorized(interaction, env.bot_owner_contact, command="ping")
         except discord.HTTPException as e:
             logger.warning("ping unauthorized reply failed: %s", e)
+        return False
+    if name in _DEV_PLACEHOLDER_SLOTS:
+        if is_user_whitelisted(env.state_dir, interaction.user.id):
+            return True
+        log_slash_input(name, interaction)
+        log_slash_denied(name, interaction, reason="not whitelisted")
+        try:
+            await _deny_unauthorized(interaction, env.bot_owner_contact, command=name)
+        except discord.HTTPException as e:
+            logger.warning("%s unauthorized reply failed: %s", name, e)
         return False
     if name in ("approve", "remove", "show_config"):
         if is_admin(env.state_dir, interaction.user.id, env.discord_admin_ids):
@@ -575,6 +587,104 @@ class UltronBot(commands.Bot):
                 interaction,
                 action="sent status placeholder",
                 fields=f"ephemeral={ephemeral}",
+            )
+
+        @self.tree.command(
+            name="new_issues",
+            description="Issues in configured new status, created ≥M days ago (see discord.new_issues in YAML).",
+        )
+        async def new_issues_cmd(interaction: discord.Interaction) -> None:
+            ni = self.app_cfg.discord.new_issues
+            ephemeral = self.app_cfg.discord.ephemeral_default
+            log_slash_input("new_issues", interaction, fields=f"ephemeral={ephemeral}")
+            if not ni.status_name.strip():
+                await interaction.response.send_message(
+                    "Set **`discord.new_issues.status_name`** in `config.yaml` to your Redmine issue status "
+                    "label (exact match, e.g. `New/Neu`).",
+                    ephemeral=True,
+                )
+                log_slash_output("new_issues", interaction, action="missing discord.new_issues.status_name")
+                return
+            await interaction.response.defer(ephemeral=ephemeral, thinking=True)
+            try:
+                sid = await resolve_status_id_by_name(self.redmine, ni.status_name)
+                if sid is None:
+                    await interaction.followup.send(
+                        f"No Redmine issue status named `{ni.status_name!r}`. "
+                        "Check **Administration → Issue statuses** for the exact name.",
+                        ephemeral=ephemeral,
+                    )
+                    log_slash_output("new_issues", interaction, action="status name not found in Redmine")
+                    return
+                issues = await self.redmine.list_issues_older_than_days(
+                    status_id=sid,
+                    min_age_days=ni.min_age_days,
+                )
+            except RedmineError as e:
+                await interaction.followup.send(f"Redmine error: {e}", ephemeral=ephemeral)
+                log_slash_error("new_issues", interaction, action="redmine request failed", detail=e)
+                return
+            total = len(issues)
+            if total == 0:
+                await interaction.followup.send(
+                    f"No issues in status `{ni.status_name}` created at least **{ni.min_age_days}** days ago "
+                    "(within the search limit).",
+                    ephemeral=ephemeral,
+                )
+                log_slash_output("new_issues", interaction, action="empty result", fields="total=0")
+                return
+            n_show = min(ni.list_limit, total)
+            header = (
+                f"**Issues with status `{ni.status_name}`** (created ≥{ni.min_age_days} days ago) · "
+                f"**{total}** total\n"
+            )
+            line_strs: list[str] = []
+            for iss in issues[:n_show]:
+                iid = int(iss["id"])
+                subj = str(iss.get("subject", "")).replace("\n", " ").replace("]", ")")
+                if len(subj) > 200:
+                    subj = subj[:197] + "..."
+                url = self.redmine.issue_url(iid)
+                line_strs.append(f"[#{iid} {subj}]({url})")
+            body = header + "\n".join(line_strs)
+            rest = total - n_show
+            if rest > 0:
+                body += f"\n\nand **{rest}** other issue(s) with status `{ni.status_name}`."
+            parts = chunk_discord(body, limit=1900)
+            await interaction.followup.send(parts[0], ephemeral=ephemeral)
+            for part in parts[1:]:
+                await interaction.followup.send(part, ephemeral=ephemeral)
+            log_slash_output(
+                "new_issues",
+                interaction,
+                action="sent issue list",
+                fields=f"total={total} shown={n_show}",
+            )
+
+        def _dev_placeholder_handler(slot: int):
+            cmd_name = f"dev_slot_{slot}"
+
+            async def _callback(interaction: discord.Interaction) -> None:
+                log_slash_input(cmd_name, interaction)
+                await interaction.response.send_message(
+                    f"Placeholder **`/{cmd_name}`** (development slot **{slot}/10**). Not wired yet.",
+                    ephemeral=True,
+                )
+                log_slash_output(
+                    cmd_name,
+                    interaction,
+                    action="dev placeholder ack",
+                    fields=f"slot={slot}",
+                )
+
+            _callback.__name__ = f"ultron_dev_slot_{slot}"
+            return _callback
+
+        for _slot in range(2, 11):
+            # Discord requires command descriptions ≤ 100 characters.
+            _desc = f"[{_slot}/10] Reserved. Tell commands apart by description; rename later."
+            self.tree.command(name=f"dev_slot_{_slot}", description=_desc)(
+                _dev_placeholder_handler(_slot)
             )
 
         @self.tree.command(name="help", description="List available commands")

@@ -61,9 +61,11 @@ python -m ultron              # or: ultron
 | `/help` | Everyone |
 | `/ping` | Allowlisted — replies `Pong` (visible in channel when not ephemeral) |
 | `/status` | Allowlisted — placeholder (visibility follows `discord.ephemeral_default`) |
+| `/new_issues` | Allowlisted — lists issues in the configured Redmine “new” status, created at least **M** days ago (`discord.new_issues` in `config.yaml`) |
 | `/summary`, `/note` | Allowlisted users only |
 | `/token` (DM) | Request an onboarding code |
 | `/approve`, `/remove`, `/show_config` | Admins (`DISCORD_ADMIN_IDS` or `admins.json`); `/show_config` shows non-secret settings (ephemeral, only you) |
+| `/dev_slot_2` … `/dev_slot_10` | Allowlisted — empty development slots; tell them apart by each command’s **description** in Discord until renamed |
 
 Typical access flow: user runs **`/token` in a DM** → an admin runs **`/approve`** with that token (or on the host: `ultron add token '<token>'`).
 

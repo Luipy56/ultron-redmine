@@ -10,6 +10,12 @@ discord:
   summary_status_llm: ""
   llm_chain_skip_status: ""
   llm_chain_all_failed_message: ""
+  # /new_issues: exact Issue status `name` from your Redmine (Administration → Issue statuses).
+  # list_limit = how many issues to show with links; min_age_days = created at least this many days ago.
+  new_issues:
+    status_name: ""
+    list_limit: null
+    min_age_days: null
 
 reports:
   channel_id: 0

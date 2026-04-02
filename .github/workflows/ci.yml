@@ -2,9 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main, prod]
-  pull_request:
-    branches: [main, prod]
+    branches:
+      - prod
 
 jobs:
   test:
@@ -37,7 +36,6 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     needs: [test, build]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
     steps:
       - uses: actions/checkout@v4
 

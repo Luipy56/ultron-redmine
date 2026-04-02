@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -24,12 +24,22 @@ _DEFAULT_LLM_CHAIN_MAX_RETRIES = 2
 
 
 @dataclass
+class NewIssuesSlashConfig:
+    """`/new_issues`: list issues whose status name matches Redmine, created ≥ `min_age_days` ago."""
+
+    status_name: str = ""
+    list_limit: int = 20
+    min_age_days: int = 2
+
+
+@dataclass
 class DiscordConfig:
     ephemeral_default: bool = True
     summary_status_redmine: str = _DEFAULT_SUMMARY_STATUS_REDMINE
     summary_status_llm: str = _DEFAULT_SUMMARY_STATUS_LLM
     llm_chain_skip_status: str = _DEFAULT_LLM_CHAIN_SKIP_STATUS
     llm_chain_all_failed_message: str = _DEFAULT_LLM_CHAIN_ALL_FAILED
+    new_issues: NewIssuesSlashConfig = field(default_factory=NewIssuesSlashConfig)
 
 
 @dataclass
@@ -211,6 +221,14 @@ def load_config(path: Path) -> AppConfig:
     tz = str(raw.get("timezone") or "UTC")
 
     d_raw = raw.get("discord") or {}
+    ni_raw = d_raw.get("new_issues") or {}
+    list_limit = max(1, _int(ni_raw.get("list_limit"), 20))
+    min_age_days = max(0, _int(ni_raw.get("min_age_days"), 2))
+    new_issues_cfg = NewIssuesSlashConfig(
+        status_name=_str(ni_raw.get("status_name"), ""),
+        list_limit=list_limit,
+        min_age_days=min_age_days,
+    )
     discord_cfg = DiscordConfig(
         ephemeral_default=_bool(d_raw.get("ephemeral_default"), True),
         summary_status_redmine=_str(d_raw.get("summary_status_redmine"), _DEFAULT_SUMMARY_STATUS_REDMINE),
@@ -219,6 +237,7 @@ def load_config(path: Path) -> AppConfig:
         llm_chain_all_failed_message=_str(
             d_raw.get("llm_chain_all_failed_message"), _DEFAULT_LLM_CHAIN_ALL_FAILED
         ),
+        new_issues=new_issues_cfg,
     )
 
     r_raw = raw.get("reports") or {}

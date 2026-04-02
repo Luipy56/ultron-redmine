@@ -13,7 +13,7 @@ Whenever you **add, rename, remove, or change behavior** of a Discord slash comm
 1. **Handler** — `@self.tree.command` / options / `describe` / ephemeral vs public replies.
 2. **`_tree_interaction_check`** (`_tree_interaction_check` / `_slash_command_name`) — Correct bucket:
    - **Everyone:** `token`, `help` (and any new public command).
-   - **Whitelisted:** default path after admin checks; **`ping`** is special (whitelist only, then deny like summary/note).
+   - **Whitelisted:** default path after admin checks; **`ping`** is special (whitelist only, then deny like summary/note). **`new_issues`** — same. **`dev_slot_2` … `dev_slot_10`** — same (reserved dev placeholders).
    - **Bot admins only:** same pattern as `approve` / `remove` (`is_admin`, deny reply + logging).
 3. **`_HELP_TEXT`** — Mirror the real matrix: sections **Everyone**, **Whitelisted users**, **Bot admins only**; exact command names and options.
 4. **Logging** — Use `log_slash_input` / `log_slash_output` / `log_slash_error` / `log_slash_denied` (and `extra={"slash_phase": ...}` is handled by helpers); no duplicate ad-hoc command logs.
