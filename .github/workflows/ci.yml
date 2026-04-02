@@ -41,11 +41,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install SSH key
-        uses: shimataro/ssh-key-action@v2
-        with:
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          known_hosts: ${{ secrets.SSH_KNOWN_HOSTS }}
+      # Use the deploy key explicitly (-i). shimataro/ssh-key-action can fail to wire the identity for rsync on some runners.
+      - name: Configure SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -eux
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          tr -d '\r' < ~/.ssh/deploy_key > ~/.ssh/deploy_key.tmp && mv ~/.ssh/deploy_key.tmp ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
 
       - name: Rsync to server
         env:
@@ -55,7 +64,9 @@ jobs:
         run: |
           set -eux
           SSH_PORT="${HOST_PORT:-22}"
-          rsync -avz -e "ssh -p ${SSH_PORT} -o StrictHostKeyChecking=yes" --delete \
+          SSH=(ssh -i ~/.ssh/deploy_key -p "${SSH_PORT}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o BatchMode=yes)
+          "${SSH[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" 'echo "ssh: ok"'
+          rsync -avz -e "${SSH[*]}" --delete \
             --exclude '.git' \
             --exclude '.env' \
             --exclude 'data' \
@@ -69,6 +80,8 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           HOST_PORT: ${{ secrets.HOST_PORT }}
         run: |
+          set -eux
           SSH_PORT="${HOST_PORT:-22}"
-          ssh -p "${SSH_PORT}" -o StrictHostKeyChecking=yes "${DEPLOY_USER}@${DEPLOY_HOST}" \
+          SSH=(ssh -i ~/.ssh/deploy_key -p "${SSH_PORT}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o BatchMode=yes)
+          "${SSH[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
             'set -e; cd /home/luipy/ultron; test -d .venv || python3 -m venv .venv; .venv/bin/pip install -U pip -q; .venv/bin/pip install -q -e .'
