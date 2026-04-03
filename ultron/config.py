@@ -33,6 +33,32 @@ class NewIssuesSlashConfig:
 
 
 @dataclass
+class LogsChannelFeatures:
+    """Per-feature toggles for the Discord logs channel (only apply when ``registration_log.enabled`` is true)."""
+
+    startup: bool = True
+    whitelist_events: bool = True
+
+
+@dataclass
+class RegistrationLogConfig:
+    """Discord logs channel: master switch ``enabled`` + ``channel_id``; feature flags under ``features``."""
+
+    enabled: bool = False
+    channel_id: int = 0
+    features: LogsChannelFeatures = field(default_factory=LogsChannelFeatures)
+
+
+@dataclass
+class UnassignedOpenConfig:
+    """`/unassigned_issues`: unassigned + Redmine-open issues, created ≥ ``min_age_days`` ago, excluding status prefixes."""
+
+    min_age_days: int = 1
+    list_limit: int = 20
+    closed_status_prefixes: tuple[str, ...] = ()
+
+
+@dataclass
 class DiscordConfig:
     ephemeral_default: bool = True
     summary_status_redmine: str = _DEFAULT_SUMMARY_STATUS_REDMINE
@@ -40,6 +66,8 @@ class DiscordConfig:
     llm_chain_skip_status: str = _DEFAULT_LLM_CHAIN_SKIP_STATUS
     llm_chain_all_failed_message: str = _DEFAULT_LLM_CHAIN_ALL_FAILED
     new_issues: NewIssuesSlashConfig = field(default_factory=NewIssuesSlashConfig)
+    registration_log: RegistrationLogConfig = field(default_factory=RegistrationLogConfig)
+    unassigned_open: UnassignedOpenConfig = field(default_factory=UnassignedOpenConfig)
 
 
 @dataclass
@@ -63,6 +91,9 @@ class StaleNewSchedule:
     require_unassigned: bool = True
     max_journal_entries: int = 1
     max_issues: int = 50
+    #: If set, only issues whose current Redmine **status name** matches (see Administration → Issue statuses).
+    #: Empty / omitted = all **open** issues (Redmine ``status_id=open``). Matching is case-insensitive.
+    issue_status_name: str | None = None
 
 
 @dataclass
@@ -229,6 +260,29 @@ def load_config(path: Path) -> AppConfig:
         list_limit=list_limit,
         min_age_days=min_age_days,
     )
+    reg_raw = d_raw.get("registration_log") or {}
+    feat_raw = reg_raw.get("features") or {}
+    registration_log_cfg = RegistrationLogConfig(
+        enabled=_bool(reg_raw.get("enabled"), False),
+        channel_id=_int(reg_raw.get("channel_id"), 0),
+        features=LogsChannelFeatures(
+            startup=_bool(feat_raw.get("startup"), True),
+            whitelist_events=_bool(feat_raw.get("whitelist_events"), True),
+        ),
+    )
+    uo_raw = d_raw.get("unassigned_open") or {}
+    csp_raw = uo_raw.get("closed_status_prefixes")
+    if csp_raw is None or csp_raw == []:
+        closed_prefixes: tuple[str, ...] = ()
+    elif isinstance(csp_raw, list):
+        closed_prefixes = tuple(str(x).strip() for x in csp_raw if str(x).strip())
+    else:
+        raise ValueError("discord.unassigned_open.closed_status_prefixes must be a list of strings")
+    unassigned_open_cfg = UnassignedOpenConfig(
+        min_age_days=max(0, _int(uo_raw.get("min_age_days"), 1)),
+        list_limit=max(1, _int(uo_raw.get("list_limit"), 20)),
+        closed_status_prefixes=closed_prefixes,
+    )
     discord_cfg = DiscordConfig(
         ephemeral_default=_bool(d_raw.get("ephemeral_default"), True),
         summary_status_redmine=_str(d_raw.get("summary_status_redmine"), _DEFAULT_SUMMARY_STATUS_REDMINE),
@@ -238,6 +292,8 @@ def load_config(path: Path) -> AppConfig:
             d_raw.get("llm_chain_all_failed_message"), _DEFAULT_LLM_CHAIN_ALL_FAILED
         ),
         new_issues=new_issues_cfg,
+        registration_log=registration_log_cfg,
+        unassigned_open=unassigned_open_cfg,
     )
 
     r_raw = raw.get("reports") or {}
@@ -253,6 +309,12 @@ def load_config(path: Path) -> AppConfig:
         max_days_without_update=_int(ab.get("max_days_without_update"), 14),
         max_issues=_int(ab.get("max_issues"), 50),
     )
+    isn_raw = sn.get("issue_status_name")
+    if isn_raw is None or (isinstance(isn_raw, str) and not isn_raw.strip()):
+        issue_status_name: str | None = None
+    else:
+        issue_status_name = str(isn_raw).strip()
+
     stale_new = StaleNewSchedule(
         enabled=_bool(sn.get("enabled"), True),
         interval_hours=_int(sn.get("interval_hours"), 24),
@@ -260,6 +322,7 @@ def load_config(path: Path) -> AppConfig:
         require_unassigned=_bool(sn.get("require_unassigned"), True),
         max_journal_entries=_int(sn.get("max_journal_entries"), 1),
         max_issues=_int(sn.get("max_issues"), 50),
+        issue_status_name=issue_status_name,
     )
 
     l_raw = raw.get("logging") or {}

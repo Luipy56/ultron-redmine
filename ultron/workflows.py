@@ -15,6 +15,13 @@ SUMMARY_SYSTEM = (
     "Respond in the same language as the ticket content when obvious; otherwise use English."
 )
 
+ASK_ABOUT_ISSUE_SYSTEM = (
+    "You answer questions about a Redmine issue for a technical team. "
+    "Use only information present in the ticket text (description, metadata, journal notes). "
+    "If the ticket does not contain enough information to answer, say so clearly. "
+    "Be concise. Respond in the same language as the question or ticket when obvious; otherwise use English."
+)
+
 NOTE_SYSTEM = (
     "You write the body of one Redmine journal note as plain text. "
     "Output ONLY that note text and nothing else (no preamble, no labels). "
@@ -74,6 +81,53 @@ async def summarize_issue(
     wf_info(
         logger,
         "summarize_issue",
+        _WF_LLM_DONE,
+        "issue_id=%s response_chars=%s",
+        issue_id,
+        len(out),
+    )
+    return out
+
+
+async def ask_about_issue(
+    *,
+    redmine: RedmineClient,
+    llm: LLMBackend,
+    issue_id: int,
+    question: str,
+    log_read_messages: bool = False,
+    on_before_llm: Callable[[], Awaitable[None]] | None = None,
+    on_llm_chain_skip: ChainSkipCallback | None = None,
+) -> str:
+    issue = await redmine.get_issue(issue_id)
+    body = format_issue_for_summary(issue)
+    user_prompt = f"Teammate question:\n{question}\n\n---\nRedmine ticket:\n{body}"
+    if log_read_messages:
+        log_read_payload(label=f"ask_issue.issue_id={issue_id}.formatted_body", text=body)
+        log_read_payload(label=f"ask_issue.issue_id={issue_id}.llm_system", text=ASK_ABOUT_ISSUE_SYSTEM)
+        log_read_payload(label=f"ask_issue.issue_id={issue_id}.llm_user", text=user_prompt)
+    wf_info(
+        logger,
+        "ask_about_issue",
+        _WF_FETCH,
+        "issue_id=%s prompt_chars=%s",
+        issue_id,
+        len(user_prompt),
+    )
+    wf_info(logger, "ask_about_issue", _WF_LLM_CALL, "issue_id=%s", issue_id)
+    if on_before_llm is not None:
+        await on_before_llm()
+    if isinstance(llm, LLMChainClient) and on_llm_chain_skip is not None:
+        out = await llm.complete(
+            system=ASK_ABOUT_ISSUE_SYSTEM,
+            user=user_prompt,
+            on_chain_skip=on_llm_chain_skip,
+        )
+    else:
+        out = await llm.complete(system=ASK_ABOUT_ISSUE_SYSTEM, user=user_prompt)
+    wf_info(
+        logger,
+        "ask_about_issue",
         _WF_LLM_DONE,
         "issue_id=%s response_chars=%s",
         issue_id,

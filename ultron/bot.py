@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any, Literal
 import time
 import traceback
 from collections.abc import Awaitable, Callable
@@ -10,9 +11,11 @@ import discord
 import httpx
 from discord import app_commands
 from discord.ext import commands, tasks
+from discord.utils import escape_markdown
 from openai import APITimeoutError
 
-from ultron.config import AppConfig
+from ultron import __version__ as _ULTRON_VERSION
+from ultron.config import AppConfig, UnassignedOpenConfig
 from ultron.jobs import run_abandoned_report, run_stale_new_report
 from ultron.llm import ChainSkipNotice, LLMBackend, LLMChainExhaustedError, safe_exc_message
 from ultron.redmine import IssueNotFound, RedmineClient, RedmineError, resolve_status_id_by_name
@@ -25,7 +28,7 @@ from ultron.state_store import (
     remove_user_from_whitelist,
 )
 from ultron.textutil import chunk_discord
-from ultron.workflows import add_formatted_note, summarize_issue
+from ultron.workflows import add_formatted_note, ask_about_issue, summarize_issue
 
 logger = logging.getLogger(__name__)
 cmd_log = logging.getLogger("ultron.commands")
@@ -33,6 +36,10 @@ cmd_log = logging.getLogger("ultron.commands")
 _TIMEOUT_USER_MSG = (
     "The language model did not respond in time. Try a shorter ticket, a faster model, "
     "or increase **LLM_TIMEOUT_SECONDS** in the bot environment."
+)
+_NO_LLM_SLASH_MSG = (
+    "No language model is configured. Add **llm_chain** to `config.yaml` or set **LLM_API_KEY** and **LLM_MODEL** "
+    "(and **LLM_BASE_URL**) in the environment. **`/summary`**, **`/ask_issue`**, and **`/note`** need a model."
 )
 # User-facing window when slash replies may stop updating (team policy; Discord API limits vary).
 _DISCORD_SESSION_MINUTES = 4
@@ -54,26 +61,31 @@ def _discord_note_author_label(user: discord.User) -> str:
     label = user.display_name.strip()
     return label or user.name.strip()
 
-_HELP_TEXT = """**Ultron — available slash commands**
+_HELP_TEXT = (
+    """**Ultron — available slash commands**
 
 **Everyone**
 • `/help` — Show this list.
 • `/token` — Request a one-time approval code (**DM only**). If you are already whitelisted, the bot says so and does not issue a code.
 
 **Whitelisted users**
-• `/ping` — Quick check (whitelisted only); in servers the reply is **visible in the channel**. If not authorized, same as `/summary` / `/note`.
+• `/ping` — Quick check (whitelisted only); in servers the reply is **visible in the channel**. If not authorized, same as `/summary` / `/ask_issue` / `/note`.
 • `/status` — Placeholder (reserved for future health info).
-• `/new_issues` — List issues in the configured “new” Redmine status, created at least **M** days ago (see `config.yaml`).
-• `/summary` `issue_id` — Summarize a Redmine ticket.
-• `/note` `issue_id` `text` — Append an LLM-polished note to a ticket.
+• `/new_issues` — List issues in the configured “new” Redmine status, created at least **M** days ago (see `discord.new_issues` in `config.yaml`).
+• `/issues_by_status` `status` — Same listing as `/new_issues`, but **`status`** is the Redmine issue status name (min age & cap still from `discord.new_issues`).
+• `/unassigned_issues` — Unassigned **open** Redmine issues created at least **N** day(s) ago (defaults and closed-status prefixes in `discord.unassigned_open` in `config.yaml`).
+• `/summary` `issue_id` — Summarize a Redmine ticket (requires a configured language model).
+• `/ask_issue` `issue_id` `question` — Answer a question about a ticket using the issue text as context (requires a model).
+• `/note` `issue_id` `text` — Append an LLM-polished note to a ticket (requires a model).
+
+**Note:** If no language model is configured, **`/summary`**, **`/ask_issue`**, and **`/note`** are unavailable; Redmine listing, **`/ping`**, and registration still work.
 
 **Bot admins only**
 • `/approve` `token` — Approve someone who used `/token` (paste their code).
 • `/remove` `user_id` — Remove a Discord user id from the whitelist.
-• `/show_config` — Show important non-secret settings (**ephemeral** only).
-
-**Whitelisted — dev placeholders**
-• `/dev_slot_2` … `/dev_slot_10` — Empty stubs; tell them apart via **each command’s description** in Discord until we rename them."""
+• `/show_config` — Show important non-secret settings (**ephemeral** only)."""
+    + f"\n\n*Ultron v{_ULTRON_VERSION}*"
+)
 
 
 def _slash_command_name(interaction: discord.Interaction) -> str | None:
@@ -207,6 +219,38 @@ def _unauthorized_dm_text(owner_contact: str | None) -> str:
     return text
 
 
+async def _fetch_discord_user(client: discord.Client, uid: int) -> discord.User | None:
+    """Resolve a user for display; ``None`` if the account no longer exists."""
+    u = client.get_user(uid)
+    if u is not None:
+        return u
+    try:
+        return await client.fetch_user(uid)
+    except discord.NotFound:
+        return None
+
+
+def _whitelisted_user_ack_message(user: discord.User | None, uid: int) -> str:
+    """Ephemeral reply for `/approve`: show display name / handle plus numeric id."""
+    if user is None:
+        return (
+            f"Whitelisted user **`{uid}`**. Discord profile could not be loaded "
+            "(the user can still use the bot if whitelisted)."
+        )
+    display = (user.global_name or "").strip() or user.name
+    safe = escape_markdown(display)
+    return f"Whitelisted **{safe}** (`{uid}`)."
+
+
+def _whitelisted_user_log_label(user: discord.User | None, uid: int) -> str:
+    """Short fragment for the registration logs channel."""
+    if user is None:
+        return f"user **`{uid}`** (profile not loaded)"
+    display = (user.global_name or "").strip() or user.name
+    safe = escape_markdown(display)
+    return f"**{safe}** (`{uid}`)"
+
+
 def _format_show_config(app_cfg: AppConfig, env: EnvSettings) -> str:
     """Redacted summary for `/show_config` (no API keys or secrets)."""
     ru = urlparse(env.redmine_url)
@@ -221,6 +265,11 @@ def _format_show_config(app_cfg: AppConfig, env: EnvSettings) -> str:
         f"• **discord.ephemeral_default:** {app_cfg.discord.ephemeral_default}",
         f"• **discord.new_issues:** status_name={ni.status_name!r} list_limit={ni.list_limit} "
         f"min_age_days={ni.min_age_days}",
+        f"• **discord.registration_log:** enabled={app_cfg.discord.registration_log.enabled} "
+        f"channel_id={app_cfg.discord.registration_log.channel_id}",
+        f"• **discord.unassigned_open:** min_age_days={app_cfg.discord.unassigned_open.min_age_days} "
+        f"list_limit={app_cfg.discord.unassigned_open.list_limit} "
+        f"closed_status_prefixes={list(app_cfg.discord.unassigned_open.closed_status_prefixes)!r}",
         f"• **reports.channel_id:** {app_cfg.reports.channel_id}",
         f"• **logging.log_read_messages:** {app_cfg.logging.log_read_messages}",
     ]
@@ -235,7 +284,12 @@ def _format_show_config(app_cfg: AppConfig, env: EnvSettings) -> str:
         f"min_age_h={sn.min_age_hours} require_unassigned={sn.require_unassigned} "
         f"max_journal_entries={sn.max_journal_entries} max_issues={sn.max_issues}"
     )
-    if app_cfg.llm_chain:
+    if not env.llm_enabled:
+        lines.append(
+            "• **llm:** no language model configured — **`/summary`** / **`/ask_issue`** / **`/note`** and AI text in scheduled "
+            "reports are skipped until you add **llm_chain** or **LLM_*** env vars"
+        )
+    elif app_cfg.llm_chain:
         lines.append("• **llm_chain:**")
         for i, spec in enumerate(app_cfg.llm_chain):
             label = spec.name or f"entry[{i}]"
@@ -479,6 +533,139 @@ def _log_slash_command_failure(command: str, exc: BaseException) -> None:
     )
 
 
+def _discord_formatted_issue_lines(issues: list[dict[str, Any]], redmine: RedmineClient) -> list[str]:
+    """Markdown lines: escaped subject + linked ``[#id](url)`` per issue."""
+    line_strs: list[str] = []
+    for iss in issues:
+        iid = int(iss["id"])
+        raw_subj = str(iss.get("subject", "")).replace("\n", " ").strip()
+        if len(raw_subj) > 200:
+            raw_subj = raw_subj[:197] + "..."
+        subj_display = escape_markdown(raw_subj)
+        if len(subj_display) > 220:
+            subj_display = subj_display[:217] + "..."
+        url = redmine.issue_url(iid)
+        link = f"[#{iid}]({url})"
+        if raw_subj:
+            line_strs.append(f"{subj_display} {link}")
+        else:
+            line_strs.append(link)
+    return line_strs
+
+
+async def _send_unassigned_open_issues_list(
+    *,
+    interaction: discord.Interaction,
+    redmine: RedmineClient,
+    ephemeral: bool,
+    cfg: UnassignedOpenConfig,
+    log_command: str,
+) -> None:
+    """List unassigned open issues past min age; interaction already deferred."""
+    try:
+        issues = await redmine.list_unassigned_open_issues_older_than_days(
+            min_age_days=cfg.min_age_days,
+            closed_status_prefixes=cfg.closed_status_prefixes,
+        )
+    except RedmineError as e:
+        await interaction.followup.send(f"Redmine error: {e}", ephemeral=ephemeral)
+        log_slash_error(log_command, interaction, action="redmine request failed", detail=e)
+        return
+    total = len(issues)
+    if total == 0:
+        await interaction.followup.send(
+            "No **unassigned** **open** issues created at least "
+            f"**{cfg.min_age_days}** day(s) ago (within the search limit), after excluding "
+            "closed-equivalent status prefixes.",
+            ephemeral=ephemeral,
+        )
+        log_slash_output(log_command, interaction, action="empty result", fields="total=0")
+        return
+    n_show = min(cfg.list_limit, total)
+    header = (
+        f"**Unassigned open issues** (created ≥{cfg.min_age_days} days ago; "
+        "unassigned; Redmine `open`; excluding configured closed-equivalent status prefixes) · "
+        f"**{total}** total"
+    )
+    line_strs = _discord_formatted_issue_lines(issues[:n_show], redmine)
+    body = header + "\n\n" + "\n".join(line_strs)
+    rest = total - n_show
+    if rest > 0:
+        _other = "issue" if rest == 1 else "issues"
+        body += f"\n\nand **{rest}** other {_other} matching this filter."
+    parts = chunk_discord(body, limit=1900)
+    await interaction.followup.send(parts[0], ephemeral=ephemeral, suppress_embeds=True)
+    for part in parts[1:]:
+        await interaction.followup.send(part, ephemeral=ephemeral, suppress_embeds=True)
+    log_slash_output(
+        log_command,
+        interaction,
+        action="sent unassigned issue list",
+        fields=f"total={total} shown={n_show}",
+    )
+
+
+async def _send_issues_older_than_days_list(
+    *,
+    interaction: discord.Interaction,
+    redmine: RedmineClient,
+    ephemeral: bool,
+    status_name: str,
+    min_age_days: int,
+    list_limit: int,
+    log_command: str,
+) -> None:
+    """Fetch issues in ``status_name`` older than ``min_age_days`` and send formatted chunks (interaction already deferred)."""
+    try:
+        sid = await resolve_status_id_by_name(redmine, status_name)
+        if sid is None:
+            await interaction.followup.send(
+                f"No Redmine issue status named `{status_name!r}`. "
+                "Check **Administration → Issue statuses** for the exact name.",
+                ephemeral=ephemeral,
+            )
+            log_slash_output(log_command, interaction, action="status name not found in Redmine")
+            return
+        issues = await redmine.list_issues_older_than_days(
+            status_id=sid,
+            min_age_days=min_age_days,
+        )
+    except RedmineError as e:
+        await interaction.followup.send(f"Redmine error: {e}", ephemeral=ephemeral)
+        log_slash_error(log_command, interaction, action="redmine request failed", detail=e)
+        return
+    total = len(issues)
+    if total == 0:
+        await interaction.followup.send(
+            f"No issues in status `{status_name}` created at least **{min_age_days}** days ago "
+            "(within the search limit).",
+            ephemeral=ephemeral,
+        )
+        log_slash_output(log_command, interaction, action="empty result", fields="total=0")
+        return
+    n_show = min(list_limit, total)
+    header = (
+        f"**Issues with status `{status_name}`** (created ≥{min_age_days} days ago) · "
+        f"**{total}** total"
+    )
+    line_strs = _discord_formatted_issue_lines(issues[:n_show], redmine)
+    body = header + "\n\n" + "\n".join(line_strs)
+    rest = total - n_show
+    if rest > 0:
+        _other = "issue" if rest == 1 else "issues"
+        body += f"\n\nand **{rest}** other {_other} with status `{status_name}`."
+    parts = chunk_discord(body, limit=1900)
+    await interaction.followup.send(parts[0], ephemeral=ephemeral, suppress_embeds=True)
+    for part in parts[1:]:
+        await interaction.followup.send(part, ephemeral=ephemeral, suppress_embeds=True)
+    log_slash_output(
+        log_command,
+        interaction,
+        action="sent issue list",
+        fields=f"total={total} shown={n_show}",
+    )
+
+
 class UltronCommandTree(app_commands.CommandTree):
     """discord.py invokes interaction_check on CommandTree only, not on commands.Bot."""
 
@@ -511,6 +698,68 @@ class UltronBot(commands.Bot):
         self.llm = llm
         self._jobs_started = False
 
+    async def logs_channel_send(
+        self,
+        content: str,
+        *,
+        feature: Literal["startup", "whitelist"],
+    ) -> None:
+        """Post to the Discord logs channel when enabled and the matching ``features.*`` flag is true."""
+        rl = self.app_cfg.discord.registration_log
+        if not rl.enabled:
+            return
+        if feature == "startup" and not rl.features.startup:
+            return
+        if feature == "whitelist" and not rl.features.whitelist_events:
+            return
+        if not rl.channel_id:
+            logger.warning("discord.registration_log: enabled is true but channel_id is 0")
+            return
+        ch = self.get_channel(rl.channel_id)
+        if ch is None:
+            logger.warning("logs channel: channel_id %s not visible to bot", rl.channel_id)
+            return
+        try:
+            await ch.send(content[:_DISCORD_MSG_MAX])
+        except discord.HTTPException as e:
+            logger.warning("logs channel: send failed: %s", e)
+
+    async def _announce_startup_in_logs_channel(self) -> None:
+        """First action after the bot activates: summarize online status and scheduled-report settings."""
+        rl = self.app_cfg.discord.registration_log
+        if not rl.enabled or not rl.features.startup:
+            return
+        bot = self.user
+        line1 = (
+            f"**Ultron** is **online** — logged in as **{bot}** (`{bot.id}`)."
+            if bot
+            else "**Ultron** is **online**."
+        )
+        rcid = self.app_cfg.reports.channel_id
+        if not rcid:
+            line2 = "Scheduled ticket reports: **off** (`reports.channel_id` is 0)."
+        else:
+            ch = self.get_channel(rcid)
+            vis = "reachable" if ch else "**not visible** to the bot (scheduled jobs will not run)"
+            ab = self.app_cfg.schedules.abandoned
+            sn = self.app_cfg.schedules.stale_new
+            st_part = f"Stale-new: **{'on' if sn.enabled else 'off'}** / {sn.interval_hours}h"
+            if sn.issue_status_name:
+                st_part += f" (status filter **{sn.issue_status_name}**)"
+            line2 = (
+                f"Scheduled reports channel `{rcid}` ({vis}). "
+                f"Abandoned: **{'on' if ab.enabled else 'off'}** / {ab.interval_hours}h · "
+                f"{st_part}."
+            )
+        line3 = ""
+        if not self.env.llm_enabled:
+            line3 = (
+                "\n**Language model:** none assigned — **`/summary`**, **`/ask_issue`**, and **`/note`** stay disabled until you "
+                "configure one. You can still use Redmine listing, **`/ping`**, **`/token`**, admin commands, and "
+                "scheduled reports (plain issue lists when no model is configured)."
+            )
+        await self.logs_channel_send(f"{line1}\n{line2}{line3}", feature="startup")
+
     async def setup_hook(self) -> None:
         guild = discord.Object(id=self.env.discord_guild_id) if self.env.discord_guild_id else None
 
@@ -531,7 +780,7 @@ class UltronBot(commands.Bot):
                 return
             if is_user_whitelisted(self.env.state_dir, interaction.user.id):
                 await interaction.response.send_message(
-                    "You are already approved. You can use **`/summary`** and **`/note`** — you do not need a new token.",
+                    "You are already approved. You can use **`/summary`**, **`/ask_issue`**, and **`/note`** — you do not need a new token.",
                     ephemeral=True,
                 )
                 log_slash_output(
@@ -553,27 +802,49 @@ class UltronBot(commands.Bot):
                 action="sent ephemeral (new approval token issued)",
                 fields=f"token_len={len(tok)}",
             )
+            await self.logs_channel_send(
+                f"**Registration** `/token` — user **{interaction.user}** (`{interaction.user.id}`) "
+                "requested an approval token.",
+                feature="whitelist",
+            )
 
         @self.tree.command(name="ping", description="Simple connectivity check (replies Pong)")
         async def ping_cmd(interaction: discord.Interaction) -> None:
             _ping_reply = "Pong"
             log_slash_input("ping", interaction)
             try:
-                # Defer + followup so the reply is a normal channel-visible webhook message, not “only you” in servers.
-                await interaction.response.defer(ephemeral=False)
-                await interaction.followup.send(_ping_reply, ephemeral=False)
+                if interaction.response.is_done():
+                    # Something already acknowledged this interaction (unusual unless a race or library edge case).
+                    await interaction.followup.send(_ping_reply, ephemeral=False)
+                    log_action = "followup only (response already done)"
+                elif interaction.guild is not None:
+                    # Guild: defer + followup so the reply is a normal channel-visible webhook message.
+                    await interaction.response.defer(ephemeral=False)
+                    await interaction.followup.send(_ping_reply, ephemeral=False)
+                    log_action = "defer + public followup posted to channel"
+                else:
+                    # DM: immediate response. (defer/send quirks in DM are avoided vs guild-only defer.)
+                    await interaction.response.send_message(_ping_reply)
+                    log_action = "send_message in DM"
             except discord.HTTPException as e:
+                # 10062: token already used — common when two bot processes handle the same event (only one may ACK).
+                if getattr(e, "code", None) == 10062:
+                    logger.info(
+                        "ping: unknown interaction (10062) — another process likely responded first; "
+                        "ensure only one Ultron instance is running with this token"
+                    )
+                    return
                 log_slash_error(
                     "ping",
                     interaction,
-                    action="defer or followup failed",
+                    action="ping reply failed",
                     detail=e,
                 )
                 raise
             log_slash_output(
                 "ping",
                 interaction,
-                action="defer + public followup posted to channel",
+                action=log_action,
                 fields=f"reply={_ping_reply!r}",
             )
 
@@ -606,59 +877,65 @@ class UltronBot(commands.Bot):
                 log_slash_output("new_issues", interaction, action="missing discord.new_issues.status_name")
                 return
             await interaction.response.defer(ephemeral=ephemeral, thinking=True)
-            try:
-                sid = await resolve_status_id_by_name(self.redmine, ni.status_name)
-                if sid is None:
-                    await interaction.followup.send(
-                        f"No Redmine issue status named `{ni.status_name!r}`. "
-                        "Check **Administration → Issue statuses** for the exact name.",
-                        ephemeral=ephemeral,
-                    )
-                    log_slash_output("new_issues", interaction, action="status name not found in Redmine")
-                    return
-                issues = await self.redmine.list_issues_older_than_days(
-                    status_id=sid,
-                    min_age_days=ni.min_age_days,
-                )
-            except RedmineError as e:
-                await interaction.followup.send(f"Redmine error: {e}", ephemeral=ephemeral)
-                log_slash_error("new_issues", interaction, action="redmine request failed", detail=e)
-                return
-            total = len(issues)
-            if total == 0:
-                await interaction.followup.send(
-                    f"No issues in status `{ni.status_name}` created at least **{ni.min_age_days}** days ago "
-                    "(within the search limit).",
-                    ephemeral=ephemeral,
-                )
-                log_slash_output("new_issues", interaction, action="empty result", fields="total=0")
-                return
-            n_show = min(ni.list_limit, total)
-            header = (
-                f"**Issues with status `{ni.status_name}`** (created ≥{ni.min_age_days} days ago) · "
-                f"**{total}** total\n"
+            await _send_issues_older_than_days_list(
+                interaction=interaction,
+                redmine=self.redmine,
+                ephemeral=ephemeral,
+                status_name=ni.status_name.strip(),
+                min_age_days=ni.min_age_days,
+                list_limit=ni.list_limit,
+                log_command="new_issues",
             )
-            line_strs: list[str] = []
-            for iss in issues[:n_show]:
-                iid = int(iss["id"])
-                subj = str(iss.get("subject", "")).replace("\n", " ").replace("]", ")")
-                if len(subj) > 200:
-                    subj = subj[:197] + "..."
-                url = self.redmine.issue_url(iid)
-                line_strs.append(f"[#{iid} {subj}]({url})")
-            body = header + "\n".join(line_strs)
-            rest = total - n_show
-            if rest > 0:
-                body += f"\n\nand **{rest}** other issue(s) with status `{ni.status_name}`."
-            parts = chunk_discord(body, limit=1900)
-            await interaction.followup.send(parts[0], ephemeral=ephemeral)
-            for part in parts[1:]:
-                await interaction.followup.send(part, ephemeral=ephemeral)
-            log_slash_output(
-                "new_issues",
+
+        @self.tree.command(
+            name="issues_by_status",
+            description="List issues by Redmine status name; min age & cap from discord.new_issues YAML.",
+        )
+        @app_commands.describe(
+            status="Redmine issue status name (exact label; Administration → Issue statuses)."
+        )
+        async def issues_by_status_cmd(interaction: discord.Interaction, status: str) -> None:
+            ni = self.app_cfg.discord.new_issues
+            ephemeral = self.app_cfg.discord.ephemeral_default
+            log_slash_input(
+                "issues_by_status",
                 interaction,
-                action="sent issue list",
-                fields=f"total={total} shown={n_show}",
+                fields=f"ephemeral={ephemeral} status={status!r}",
+            )
+            st = status.strip()
+            if not st:
+                await interaction.response.send_message(
+                    "Pass **`status`**: the Redmine issue status name (e.g. `New/Neu`).",
+                    ephemeral=True,
+                )
+                log_slash_output("issues_by_status", interaction, action="missing status parameter")
+                return
+            await interaction.response.defer(ephemeral=ephemeral, thinking=True)
+            await _send_issues_older_than_days_list(
+                interaction=interaction,
+                redmine=self.redmine,
+                ephemeral=ephemeral,
+                status_name=st,
+                min_age_days=ni.min_age_days,
+                list_limit=ni.list_limit,
+                log_command="issues_by_status",
+            )
+
+        @self.tree.command(
+            name="unassigned_issues",
+            description="Unassigned open issues older than min age; see discord.unassigned_open in config YAML.",
+        )
+        async def unassigned_issues_cmd(interaction: discord.Interaction) -> None:
+            uo = self.app_cfg.discord.unassigned_open
+            ephemeral = self.app_cfg.discord.ephemeral_default
+            log_slash_input("unassigned_issues", interaction, fields=f"ephemeral={ephemeral}")
+            await interaction.response.defer(ephemeral=ephemeral, thinking=True)
+            await _send_unassigned_open_issues_list(
+                interaction=interaction,
+                redmine=self.redmine,
+                ephemeral=ephemeral,
+                cfg=uo,
+                log_command="unassigned_issues",
             )
 
         def _dev_placeholder_handler(slot: int):
@@ -708,8 +985,11 @@ class UltronBot(commands.Bot):
                     fields=f"error={e!r}",
                 )
                 return
+            target = await _fetch_discord_user(interaction.client, uid)
+            if target is None:
+                logger.warning("approve: user_id=%s could not be resolved for display/DM", uid)
             await interaction.response.send_message(
-                f"Whitelisted Discord user id **{uid}**.",
+                _whitelisted_user_ack_message(target, uid),
                 ephemeral=True,
             )
             log_slash_output(
@@ -718,17 +998,15 @@ class UltronBot(commands.Bot):
                 action="sent ephemeral (user whitelisted)",
                 fields=f"approved_user_id={uid} actor_id={interaction.user.id}",
             )
-            target = interaction.client.get_user(uid)
-            if target is None:
-                try:
-                    target = await interaction.client.fetch_user(uid)
-                except discord.NotFound:
-                    logger.warning("approve: user_id=%s not found for DM notification", uid)
-                    target = None
+            await self.logs_channel_send(
+                f"**Registration** `/approve` — whitelisted {_whitelisted_user_log_label(target, uid)} "
+                f"(approved by **{interaction.user}** `{interaction.user.id}`).",
+                feature="whitelist",
+            )
             if target is not None:
                 try:
                     await target.send(
-                        "Your access request has been approved. You can now use **`/summary`** and **`/note`** with this bot.",
+                        "Your access request has been approved. You can now use **`/summary`**, **`/ask_issue`**, and **`/note`** with this bot.",
                     )
                     log_slash_output(
                         "approve",
@@ -765,6 +1043,11 @@ class UltronBot(commands.Bot):
                     action="sent ephemeral (user removed from whitelist)",
                     fields=f"removed_user_id={user_id}",
                 )
+                await self.logs_channel_send(
+                    f"**Registration** `/remove` — removed user id **{user_id}** "
+                    f"(by **{interaction.user}** `{interaction.user.id}`).",
+                    feature="whitelist",
+                )
             else:
                 await interaction.response.send_message(
                     f"User id **{user_id}** was not on the whitelist (unchanged).",
@@ -775,6 +1058,11 @@ class UltronBot(commands.Bot):
                     interaction,
                     action="sent ephemeral (target was not whitelisted)",
                     fields=f"user_id={user_id}",
+                )
+                await self.logs_channel_send(
+                    f"**Registration** `/remove` — user id **{user_id}** was not on the whitelist "
+                    f"(by **{interaction.user}** `{interaction.user.id}`).",
+                    feature="whitelist",
                 )
 
         @self.tree.command(name="show_config", description="Show important bot configuration (admins only, ephemeral)")
@@ -796,6 +1084,15 @@ class UltronBot(commands.Bot):
                 interaction,
                 fields=f"issue_id={issue_id} ephemeral={ephemeral}",
             )
+            if not self.env.llm_enabled:
+                await interaction.response.send_message(_NO_LLM_SLASH_MSG, ephemeral=ephemeral)
+                log_slash_output(
+                    "summary",
+                    interaction,
+                    action="rejected (no language model configured)",
+                    fields=f"issue_id={issue_id}",
+                )
+                return
             # send_message (not defer) avoids Discord showing "Ultron is thinking…" on public replies
             async def summary_error(msg: str) -> None:
                 if len(msg) <= _DISCORD_MSG_MAX:
@@ -907,6 +1204,141 @@ class UltronBot(commands.Bot):
                 _log_slash_command_failure("summary", e)
                 await summary_error("Something went wrong. Check bot logs.")
 
+        @self.tree.command(name="ask_issue", description="Ask a question about a Redmine ticket (LLM)")
+        @app_commands.describe(issue_id="Redmine issue number", question="What to ask about this ticket")
+        async def ask_issue_cmd(
+            interaction: discord.Interaction,
+            issue_id: int,
+            question: str,
+        ) -> None:
+            ephemeral = self.app_cfg.discord.ephemeral_default
+            q_chars = len(question)
+            log_slash_input(
+                "ask_issue",
+                interaction,
+                fields=f"issue_id={issue_id} question_chars={q_chars} ephemeral={ephemeral}",
+            )
+            if not self.env.llm_enabled:
+                await interaction.response.send_message(_NO_LLM_SLASH_MSG, ephemeral=ephemeral)
+                log_slash_output(
+                    "ask_issue",
+                    interaction,
+                    action="rejected (no language model configured)",
+                    fields=f"issue_id={issue_id}",
+                )
+                return
+
+            async def ask_issue_error(msg: str) -> None:
+                if len(msg) <= _DISCORD_MSG_MAX:
+                    await _edit_or_followup(interaction, msg, ephemeral=ephemeral)
+                else:
+                    try:
+                        await interaction.followup.send(msg, ephemeral=ephemeral)
+                    except discord.HTTPException as e:
+                        logger.error("followup failed for long error message: %s", e)
+                        if getattr(e, "code", None) == 50027 or e.status == 401:
+                            await _notify_if_interaction_dead(interaction, msg, ephemeral=ephemeral)
+                short = msg.replace("\n", " ")[:120]
+                log_slash_output(
+                    "ask_issue",
+                    interaction,
+                    action="user-visible error",
+                    fields=f"issue_id={issue_id} detail={short!r}",
+                )
+
+            await interaction.response.send_message(
+                content=self.app_cfg.discord.summary_status_redmine,
+                ephemeral=ephemeral,
+            )
+            log_slash_output(
+                "ask_issue",
+                interaction,
+                action="sent initial status (fetching Redmine)",
+                fields=f"issue_id={issue_id}",
+            )
+            t0 = time.monotonic()
+            try:
+
+                async def on_before_llm() -> None:
+                    await _edit_or_followup(
+                        interaction,
+                        self.app_cfg.discord.summary_status_llm.format(model=self.llm.model),
+                        ephemeral=ephemeral,
+                    )
+                    log_slash_output(
+                        "ask_issue",
+                        interaction,
+                        action="edited message (LLM phase)",
+                        fields=f"issue_id={issue_id} model={self.llm.model!r}",
+                    )
+
+                on_skip = _llm_chain_skip_discord_cb(
+                    interaction=interaction,
+                    ephemeral=ephemeral,
+                    template=self.app_cfg.discord.llm_chain_skip_status,
+                    command="ask_issue",
+                    issue_id=issue_id,
+                )
+                text = await ask_about_issue(
+                    redmine=self.redmine,
+                    llm=self.llm,
+                    issue_id=issue_id,
+                    question=question,
+                    log_read_messages=self.app_cfg.logging.log_read_messages,
+                    on_before_llm=on_before_llm,
+                    on_llm_chain_skip=on_skip,
+                )
+                parts = chunk_discord(text)
+                first, *rest = parts
+                await _edit_or_followup(interaction, first, ephemeral=ephemeral)
+                for part in rest:
+                    try:
+                        await interaction.followup.send(part[:_DISCORD_MSG_MAX], ephemeral=ephemeral)
+                    except discord.HTTPException as e:
+                        logger.error("followup failed for ask_issue chunk (token may have expired): %s", e)
+                        log_slash_error(
+                            "ask_issue",
+                            interaction,
+                            action="followup chunk send failed",
+                            detail=e,
+                        )
+                        break
+                out_chars = sum(len(p) for p in parts)
+                log_slash_output(
+                    "ask_issue",
+                    interaction,
+                    action="delivered answer to user",
+                    fields=(
+                        f"issue_id={issue_id} output_chars={out_chars} chunks={len(parts)} "
+                        f"elapsed_s={time.monotonic() - t0:.3f}"
+                    ),
+                )
+            except IssueNotFound:
+                await ask_issue_error(f"Issue **#{issue_id}** was not found in Redmine.")
+            except RedmineError as e:
+                logger.warning("Redmine error in ask_issue: %s", e)
+                await ask_issue_error("Redmine request failed. Try again later.")
+            except (APITimeoutError, httpx.TimeoutException) as e:
+                logger.warning(
+                    "LLM timeout in ask_issue for issue_id=%s: %s | "
+                    "Often Ollama is still loading the model, the prompt is very large, or CPU inference is slow; "
+                    "see Ollama logs. Increase LLM_TIMEOUT_SECONDS if the model can finish within one HTTP read.",
+                    issue_id,
+                    str(e),
+                )
+                await ask_issue_error(_TIMEOUT_USER_MSG)
+            except LLMChainExhaustedError as e:
+                logger.error(
+                    "ask_issue: all LLM chain providers failed | backends=%s | last=%s: %s",
+                    e.provider_count,
+                    type(e.last_error).__name__,
+                    safe_exc_message(e.last_error),
+                )
+                await ask_issue_error(self.app_cfg.discord.llm_chain_all_failed_message)
+            except Exception as e:
+                _log_slash_command_failure("ask_issue", e)
+                await ask_issue_error("Something went wrong. Check bot logs.")
+
         @self.tree.command(name="note", description="Add an LLM-polished note to a Redmine ticket")
         @app_commands.describe(issue_id="Redmine issue number", text="Note text to append")
         async def note_cmd(interaction: discord.Interaction, issue_id: int, text: str) -> None:
@@ -916,6 +1348,15 @@ class UltronBot(commands.Bot):
                 interaction,
                 fields=f"issue_id={issue_id} raw_chars={len(text)} ephemeral={ephemeral}",
             )
+            if not self.env.llm_enabled:
+                await interaction.response.send_message(_NO_LLM_SLASH_MSG, ephemeral=ephemeral)
+                log_slash_output(
+                    "note",
+                    interaction,
+                    action="rejected (no language model configured)",
+                    fields=f"issue_id={issue_id}",
+                )
+                return
             async def note_error(msg: str) -> None:
                 if len(msg) <= _DISCORD_MSG_MAX:
                     await _edit_or_followup(interaction, msg, ephemeral=ephemeral)
@@ -1004,8 +1445,20 @@ class UltronBot(commands.Bot):
 
         if guild:
             self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
-            logger.info("Slash commands synced to guild %s", self.env.discord_guild_id)
+            try:
+                await self.tree.sync(guild=guild)
+                logger.info("Slash commands synced to guild %s", self.env.discord_guild_id)
+            except discord.Forbidden as e:
+                logger.warning(
+                    "Guild slash sync failed (Forbidden, API code=%s): %s. "
+                    "The bot must be in that server with permission to create application commands — "
+                    "re-invite using a URL that includes the **applications.commands** scope, and confirm "
+                    "**DISCORD_GUILD_ID** is the correct numeric server id. Falling back to **global** sync.",
+                    getattr(e, "code", None),
+                    e,
+                )
+                await self.tree.sync()
+                logger.info("Slash commands synced globally (may take up to ~1 hour to appear)")
         else:
             await self.tree.sync()
             logger.info("Slash commands synced globally (may take up to ~1 hour to appear)")
@@ -1015,9 +1468,18 @@ class UltronBot(commands.Bot):
 
     async def on_ready(self) -> None:
         logger.info("Logged in as %s (%s)", self.user, self.user.id if self.user else "")
+        if not self.env.llm_enabled:
+            logger.info(
+                "No language model assigned — /summary, /ask_issue, and /note are disabled; "
+                "Redmine slash commands, /ping, registration, and scheduled reports (plain lists) still work."
+            )
         if self._jobs_started:
             return
         self._jobs_started = True
+
+        # First: logs channel (startup summary before scheduled report loops).
+        await self._announce_startup_in_logs_channel()
+
         cid = self.app_cfg.reports.channel_id
         if not cid:
             logger.info("config reports.channel_id is 0; scheduled reports disabled")

@@ -1,0 +1,42 @@
+timezone: UTC
+logging:
+  log_read_messages: false
+discord:
+  ephemeral_default: false
+  summary_status_redmine: Fetching ticket from Redmine…
+  summary_status_llm: Passing the task to {model}…
+  llm_chain_skip_status: '**{from_entry}** ({from_model}) failed: {reason}. Trying **{to_entry}** ({to_model})…'
+  llm_chain_all_failed_message: All configured language model providers failed (URLs, keys, quotas, or network). Check config.yaml
+    `llm_chain` and the bot logs.
+  registration_log:
+    enabled: false
+    channel_id: 148930836925999120
+    features:
+      startup: true
+      whitelist_events: true
+  new_issues:
+    status_name: New/Neu
+    list_limit: 15
+    min_age_days: 1
+reports:
+  channel_id: 0
+schedules:
+  abandoned:
+    enabled: true
+    interval_hours: 24
+    max_days_without_update: 14
+    max_issues: 50
+  stale_new:
+    enabled: true
+    interval_hours: 24
+    min_age_hours: 2
+    require_unassigned: true
+    max_journal_entries: 1
+    max_issues: 50
+llm_chain:
+- name: ollama_local
+  base_url: http://amvara8:11434/v1
+  model: qwen3:latest
+  api_key_env: OLLAMA_API_KEY
+  timeout_seconds: 240
+  max_retries: 0

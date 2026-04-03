@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ultron-bot"
-version = "0.1.0"
+version = "0.1.17"
 description = "Discord bot connecting Redmine with OpenAI-compatible LLMs"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -23,6 +23,7 @@ ultron = "ultron.__main__:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0.0"]
+wizard = ["questionary>=2.0.0"]
 
 [tool.setuptools.packages.find]
 where = ["."]

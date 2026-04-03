@@ -1,3 +1,4 @@
 """Ultron: Discord ↔ Redmine ↔ LLM bot."""
 
-__version__ = "0.1.0"
+# Release version: bump at least the patch number on every change; keep in sync with pyproject.toml [project].version.
+__version__ = "0.1.17"

@@ -1,0 +1,22 @@
+---
+description: All code comments, docstrings, and docs must be written in English
+alwaysApply: true
+---
+
+# English only (repository text)
+
+- **Comments and docstrings** in source files (`.py`, etc.): write only in **English**.
+- **Documentation**: `README`, `.md`, `.mdc` rules, inline comments in `config.example.yaml` / similar: **English** only.
+- **Identifiers** (when they carry meaning): prefer English names for symbols the team reads in code reviews.
+
+Do not mix Spanish, German, or other languages in the above, even for short notes or section headers.
+
+```python
+# ✅ GOOD: English comment
+# Resolve status id from Redmine issue_statuses.
+
+# ❌ BAD: non-English comment
+# Resuelve el id de estado desde Redmine.
+```
+
+If product copy for end users must be localized, keep that separate from developer-facing text and follow team policy; default for anything committed as **code comments or docs** remains English.

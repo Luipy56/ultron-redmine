@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from ultron.config import AbandonedSchedule, StaleNewSchedule
-from ultron.llm import LLMBackend, LLMChainExhaustedError
+from ultron.llm import LLMBackend, LLMChainExhaustedError, NullLLMBackend
 from ultron.readlog import log_read_payload
-from ultron.redmine import RedmineClient, parse_redmine_datetime
+from ultron.redmine import RedmineClient, RedmineError, parse_redmine_datetime
 from ultron.textutil import chunk_discord
 from ultron.workflow_log import wf_exception, wf_info
 
@@ -28,6 +28,14 @@ def _issue_line(issue: dict) -> str:
     subj = issue.get("subject", "")
     st = (issue.get("status") or {}).get("name", "")
     return f"- #{iid} [{st}] {subj}"
+
+
+def _effective_stale_new_status_name(cfg: StaleNewSchedule, override: str | None) -> str | None:
+    """Slash ``status`` overrides config when provided (including explicit empty → all open)."""
+    if override is not None:
+        s = override.strip()
+        return s if s else None
+    return cfg.issue_status_name
 
 
 async def run_abandoned_report(
@@ -64,6 +72,17 @@ async def run_abandoned_report(
             f"**Abandoned tickets report** ({now_local.date()})\nNo open tickets found "
             f"with last update older than {cfg.max_days_without_update} days (within search limit)."
         )
+        return
+
+    if isinstance(llm, NullLLMBackend):
+        header = (
+            f"**Abandoned tickets** (no update in ≥{cfg.max_days_without_update} days) — "
+            f"{now_local.date()}\n"
+            "_No language model is configured — listing issues without an AI summary._\n\n"
+        )
+        body = "\n".join(_issue_line(i) for i in abandoned)
+        for part in chunk_discord(header + body):
+            await channel.send(part)
         return
 
     lines = "\n".join(_issue_line(i) for i in abandoned)
@@ -113,8 +132,12 @@ async def run_stale_new_report(
     cfg: StaleNewSchedule,
     timezone_name: str,
     log_read_messages: bool = False,
+    status_name_override: str | None = None,
+    force: bool = False,
 ) -> None:
-    if not cfg.enabled or channel is None:
+    if channel is None:
+        return
+    if not force and not cfg.enabled:
         return
 
     tz = ZoneInfo(timezone_name)
@@ -122,7 +145,40 @@ async def run_stale_new_report(
     min_age = timedelta(hours=cfg.min_age_hours)
     cutoff_time = _utc_now() - min_age
 
-    candidates = await redmine.list_open_issues(sort="created_on:asc", limit=100)
+    effective_status = _effective_stale_new_status_name(cfg, status_name_override)
+    status_id_param: str | int = "open"
+    status_scope: str
+    if effective_status:
+        try:
+            rid = await redmine.resolve_issue_status_id_by_name(effective_status)
+        except RedmineError as e:
+            await channel.send(
+                f"**Stale new tickets** ({now_local.date()})\n"
+                f"Could not load issue statuses from Redmine: {e}"
+            )
+            return
+        if rid is None:
+            await channel.send(
+                f"**Stale new tickets** ({now_local.date()})\n"
+                f"No issue status named **{effective_status!s}** in Redmine. "
+                "Use the exact label from **Administration → Issue statuses** (matching is case-insensitive)."
+            )
+            return
+        status_id_param = rid
+        status_scope = f"status **{effective_status}** (id {rid})"
+    else:
+        status_scope = "all **open** issues"
+
+    try:
+        candidates = await redmine.list_issues(
+            sort="created_on:asc",
+            limit=100,
+            status_id=status_id_param,
+        )
+    except RedmineError as e:
+        await channel.send(f"**Stale new tickets** ({now_local.date()})\nRedmine request failed: {e}")
+        return
+
     stale: list[dict] = []
     for iss in candidates:
         created = parse_redmine_datetime(iss.get("created_on"))
@@ -152,11 +208,23 @@ async def run_stale_new_report(
 
     if not stale:
         await channel.send(
-            f"**Stale new tickets** ({now_local.date()})\nNo matching tickets "
-            f"(open, ≥{cfg.min_age_hours}h old"
+            f"**Stale new tickets** ({now_local.date()})\nNo matching tickets for {status_scope} "
+            f"(≥{cfg.min_age_hours}h old"
             + (", unassigned" if cfg.require_unassigned else "")
-            + f", ≤{cfg.max_journal_entries} journal entries).\n"
+            + f", ≤{cfg.max_journal_entries} journal entries; scanned up to {len(candidates)} in list order).\n"
         )
+        return
+
+    if isinstance(llm, NullLLMBackend):
+        header = (
+            f"**Stale new tickets** ({status_scope}, ≥{cfg.min_age_hours}h old"
+            + (", unassigned" if cfg.require_unassigned else "")
+            + f", ≤{cfg.max_journal_entries} journals) — {now_local.date()}\n"
+            "_No language model is configured — listing tickets without an AI summary._\n\n"
+        )
+        body = "\n".join(_issue_line(i) for i in stale)
+        for part in chunk_discord(header + body):
+            await channel.send(part)
         return
 
     lines = "\n".join(_issue_line(i) for i in stale)
@@ -194,7 +262,7 @@ async def run_stale_new_report(
 
     wf_info(logger, "stale_new_report", "LLM_DONE", "report_chars=%s", len(report))
     header = (
-        f"**Stale new tickets** (≥{cfg.min_age_hours}h old"
+        f"**Stale new tickets** ({status_scope}, ≥{cfg.min_age_hours}h old"
         + (", unassigned" if cfg.require_unassigned else "")
         + f", ≤{cfg.max_journal_entries} journals)\n"
     )

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: User guide (Discord)
+    url: https://github.com/Luipy56/ultron-redmine/blob/main/docs/USER_GUIDE.md
+    about: Onboarding and commands for people using the bot in Discord
+  - name: Operations / integration
+    url: https://github.com/Luipy56/ultron-redmine/blob/main/docs/OPERATIONS.md
+    about: Deploying Ultron, env, Redmine, and Discord integration

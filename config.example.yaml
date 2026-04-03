@@ -16,6 +16,17 @@ discord:
     status_name: ""
     list_limit: null
     min_age_days: null
+  registration_log:
+    enabled: null
+    channel_id: null
+    features:
+      startup: null
+      whitelist_events: null
+  # /unassigned_issues: open + unassigned, created ≥ min_age_days ago; exclude status names matching these prefixes (case-insensitive).
+  unassigned_open:
+    min_age_days: null
+    list_limit: null
+    closed_status_prefixes: []
 
 reports:
   channel_id: 0
@@ -33,6 +44,7 @@ schedules:
     require_unassigned: null
     max_journal_entries: null
     max_issues: null
+    issue_status_name: null
 
 logging:
   log_read_messages: null

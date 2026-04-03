@@ -31,6 +31,8 @@ class EnvSettings:
     discord_application_id: int | None
     redmine_url: str
     redmine_api_key: str
+    #: False when no LLM is configured (slash commands and Redmine still work; ``/summary`` / ``/note`` need a model).
+    llm_enabled: bool
     llm_base_url: str
     llm_api_key: str
     llm_model: str
@@ -54,6 +56,12 @@ def _opt_float(name: str) -> float | None:
     if not v:
         return None
     return float(v)
+
+
+def _env_flag_enabled(name: str) -> bool:
+    """True when ``VAR`` is set to 1 / true / yes (case-insensitive)."""
+    v = os.environ.get(name, "").strip().lower()
+    return v in ("1", "true", "yes", "on")
 
 
 def _parse_discord_admin_ids() -> frozenset[int]:
@@ -99,6 +107,14 @@ def load_env() -> EnvSettings:
 
     config_path = os.environ.get("CONFIG_PATH", "config.yaml").strip() or "config.yaml"
 
+    llm_disabled_flag = _env_flag_enabled("LLM_DISABLED") or _env_flag_enabled("ULTRON_NO_LLM")
+    has_chain = _config_file_has_llm_chain(config_path)
+    if llm_disabled_flag and has_chain:
+        raise RuntimeError(
+            "LLM_DISABLED or ULTRON_NO_LLM is set but config.yaml defines llm_chain. "
+            "Remove or disable llm_chain entries, or unset LLM_DISABLED / ULTRON_NO_LLM."
+        )
+
     ollama_api_base = os.environ.get("OLLAMA_API_BASE", "").strip()
     llm_base = os.environ.get("LLM_BASE_URL", "").strip().rstrip("/")
     if not llm_base and ollama_api_base:
@@ -111,19 +127,33 @@ def load_env() -> EnvSettings:
         llm_key = "ollama"
     if not llm_key and ":11434" in llm_base:
         llm_key = "ollama"
-    if not llm_key and _config_file_has_llm_chain(config_path):
+    if not llm_key and has_chain:
         llm_key = _LLM_CHAIN_PLACEHOLDER_KEY
-    if not llm_key:
-        raise RuntimeError(
-            "LLM_API_KEY is required (or set OLLAMA_API_BASE for local Ollama, "
-            "or define a non-empty llm_chain in config.yaml)"
-        )
 
-    llm_model = os.environ.get("LLM_MODEL", "").strip()
-    if not llm_model:
-        llm_model = os.environ.get("OLLAMA_MODEL", "").strip()
-    if not llm_model:
-        llm_model = "gpt-4o-mini"
+    llm_enabled: bool
+    if llm_disabled_flag:
+        llm_enabled = False
+    elif not llm_key:
+        llm_enabled = False
+    else:
+        llm_enabled = True
+
+    llm_model: str
+    if not llm_enabled:
+        llm_base = ""
+        llm_key = ""
+        llm_model = "(none)"
+    else:
+        if not llm_key:
+            raise RuntimeError(
+                "LLM_API_KEY is required (or set OLLAMA_API_BASE for local Ollama, "
+                "or define a non-empty llm_chain in config.yaml)"
+            )
+        llm_model = os.environ.get("LLM_MODEL", "").strip()
+        if not llm_model:
+            llm_model = os.environ.get("OLLAMA_MODEL", "").strip()
+        if not llm_model:
+            llm_model = "gpt-4o-mini"
 
     state_dir_raw = os.environ.get("ULTRON_STATE_DIR", "data").strip() or "data"
     state_dir = Path(state_dir_raw).expanduser().resolve()
@@ -131,7 +161,7 @@ def load_env() -> EnvSettings:
     bot_owner_contact = os.environ.get("BOT_OWNER_CONTACT", "").strip() or None
 
     ollama_raw = os.environ.get("OLLAMA_API_BASE", "")
-    local_ollama = _is_local_ollama(llm_base, ollama_raw)
+    local_ollama = _is_local_ollama(llm_base, ollama_raw) if llm_enabled else False
     timeout_override = _opt_float("LLM_TIMEOUT_SECONDS")
     llm_timeout = (
         timeout_override if timeout_override is not None else _DEFAULT_LLM_TIMEOUT_SECONDS
@@ -149,6 +179,7 @@ def load_env() -> EnvSettings:
         discord_application_id=_opt_int("DISCORD_APPLICATION_ID"),
         redmine_url=redmine_url,
         redmine_api_key=redmine_key,
+        llm_enabled=llm_enabled,
         llm_base_url=llm_base,
         llm_api_key=llm_key,
         llm_model=llm_model,

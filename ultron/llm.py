@@ -33,6 +33,10 @@ def safe_exc_message(exc: BaseException, *, max_len: int = _SAFE_EXC_MAX) -> str
     return s
 
 
+class NoLLMConfiguredError(RuntimeError):
+    """Raised when a feature needs a language model but none is configured (``NullLLMBackend``)."""
+
+
 class LLMChainExhaustedError(Exception):
     """Every entry in ``llm_chain`` failed with an error that allows trying the next provider."""
 
@@ -61,6 +65,20 @@ class LLMBackend(Protocol):
     def model(self) -> str: ...
 
     async def complete(self, *, system: str, user: str) -> str: ...
+
+
+@dataclass(frozen=True)
+class NullLLMBackend:
+    """Placeholder when no language model is configured; ``complete`` must not be used for real work."""
+
+    @property
+    def model(self) -> str:
+        return "(none)"
+
+    async def complete(self, *, system: str, user: str) -> str:
+        raise NoLLMConfiguredError(
+            "No language model is configured. Set LLM_* in the environment or define llm_chain in config.yaml."
+        )
 
 
 def _should_fallback_to_next_provider(exc: BaseException) -> bool:

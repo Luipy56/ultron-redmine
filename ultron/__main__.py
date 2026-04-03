@@ -106,11 +106,24 @@ def main() -> None:
     _load_dotenv()
     parser = argparse.ArgumentParser(prog="ultron")
     sub = parser.add_subparsers(dest="cmd")
+    sub.add_parser(
+        "wizard",
+        aliases=["configure"],
+        help="Interactive terminal configuration wizard (requires: pip install 'ultron-bot[wizard]')",
+    )
     p_add = sub.add_parser("add", help="Operator commands (run on the bot host)")
     add_sub = p_add.add_subparsers(dest="add_cmd", required=True)
     p_tok = add_sub.add_parser("token", help="Approve a user using the token from /token")
     p_tok.add_argument("token", help="Token string")
     args = parser.parse_args()
+    if args.cmd in ("wizard", "configure"):
+        try:
+            from ultron.wizard import run_wizard
+
+            raise SystemExit(run_wizard())
+        except RuntimeError as e:
+            print(str(e), file=sys.stderr)
+            raise SystemExit(1) from e
     if args.cmd == "add" and args.add_cmd == "token":
         from ultron.cli import cmd_add_token
 
@@ -126,7 +139,7 @@ def main() -> None:
 async def _run() -> None:
     from ultron.bot import UltronBot
     from ultron.config import LLMProviderResolved, load_config, resolve_llm_chain
-    from ultron.llm import LLMBackend, LLMChainClient, LLMClient, format_llm_endpoint
+    from ultron.llm import LLMBackend, LLMChainClient, LLMClient, NullLLMBackend, format_llm_endpoint
     from ultron.redmine import RedmineClient, RedmineError
     from ultron.settings import load_env
 
@@ -172,6 +185,12 @@ async def _run() -> None:
             "LLM configured | backend=chain | order=%s | primary_model=%r",
             " -> ".join(chain_parts),
             llm.model,
+        )
+    elif not env.llm_enabled:
+        llm = NullLLMBackend()
+        log.info(
+            "LLM not configured | backend=none | Redmine slash commands and registration work; "
+            "/summary, /ask_issue, and /note require a language model"
         )
     else:
         llm = LLMClient(
