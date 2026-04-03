@@ -26,18 +26,23 @@ def _load_dotenv() -> None:
         load_dotenv()
 
 
-class _SlashPhaseMixin:
-    """Inject %(slash_phase_colored)s for LogRecords with extra slash_phase=INPUT|OUTPUT|ERROR|DENIED."""
+class _PhaseColoredMixin:
+    """Inject %(phase_colored)s after the level: chat_phase (if set) else slash_phase."""
 
     _PHASE_COLORS = {
+        # Slash commands (extra slash_phase=…)
         "INPUT": "bold_cyan",
         "OUTPUT": "bold_green",
         "ERROR": "bold_red",
         "DENIED": "bold_purple",
+        # Chat / @mention (extra chat_phase=…)
+        "RECEIVED": "bold_blue",
+        "IGNORE": "purple",
+        "ROUTER": "bold_yellow",
     }
 
-    def _slash_phase_prefix(self, record: logging.LogRecord) -> str:
-        phase = getattr(record, "slash_phase", None)
+    def _phase_prefix(self, record: logging.LogRecord) -> str:
+        phase = getattr(record, "chat_phase", None) or getattr(record, "slash_phase", None)
         if not phase:
             return ""
         if not sys.stderr.isatty():
@@ -53,15 +58,15 @@ class _SlashPhaseMixin:
             return f"[{phase}] "
 
 
-class UltronColoredFormatter(_SlashPhaseMixin, colorlog.ColoredFormatter):
+class UltronColoredFormatter(_PhaseColoredMixin, colorlog.ColoredFormatter):
     def format(self, record: logging.LogRecord) -> str:
-        record.slash_phase_colored = self._slash_phase_prefix(record)  # type: ignore[attr-defined]
+        record.phase_colored = self._phase_prefix(record)  # type: ignore[attr-defined]
         return super().format(record)
 
 
-class UltronPlainFormatter(_SlashPhaseMixin, logging.Formatter):
+class UltronPlainFormatter(_PhaseColoredMixin, logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
-        record.slash_phase_colored = self._slash_phase_prefix(record)  # type: ignore[attr-defined]
+        record.phase_colored = self._phase_prefix(record)  # type: ignore[attr-defined]
         return super().format(record)
 
 
@@ -76,9 +81,9 @@ def _configure_logging() -> None:
     handler = logging.StreamHandler(sys.stderr)
     _line_fmt = (
         "%(asctime)s %(log_color)s%(levelname)-8s%(reset)s "
-        "%(slash_phase_colored)s%(name)s: %(message)s"
+        "%(phase_colored)s%(name)s: %(message)s"
     )
-    _line_fmt_plain = "%(asctime)s %(levelname)-8s %(slash_phase_colored)s%(name)s: %(message)s"
+    _line_fmt_plain = "%(asctime)s %(levelname)-8s %(phase_colored)s%(name)s: %(message)s"
     if sys.stderr.isatty():
         fmt = UltronColoredFormatter(
             _line_fmt,

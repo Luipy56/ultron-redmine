@@ -329,7 +329,7 @@ def log_chat_mention_input(message: discord.Message, *, fields: str = "", featur
     gl, uid, cid, mid = _message_ids(message)
     tail = f" {fields}" if fields else ""
     logger.info(
-        "source=chat | [INPUT] | feature=%s | user_id=%s guild_id=%s channel_id=%s message_id=%s%s",
+        "source=chat | feature=%s | user_id=%s guild_id=%s channel_id=%s message_id=%s%s",
         feature,
         uid,
         gl,
@@ -339,7 +339,7 @@ def log_chat_mention_input(message: discord.Message, *, fields: str = "", featur
         extra={"chat_phase": "INPUT", "message_source": "chat"},
     )
     chat_log.info(
-        "source=chat | [INPUT] | feature=%s | user_id=%s guild_id=%s channel_id=%s message_id=%s%s",
+        "source=chat | feature=%s | user_id=%s guild_id=%s channel_id=%s message_id=%s%s",
         feature,
         uid,
         gl,
@@ -355,7 +355,7 @@ def log_chat_mention_output(message: discord.Message, *, action: str, fields: st
     gl, uid, cid, mid = _message_ids(message)
     tail = f" {fields}" if fields else ""
     logger.info(
-        "source=chat | [OUTPUT] | feature=%s | %s | user_id=%s guild_id=%s channel_id=%s message_id=%s%s",
+        "source=chat | feature=%s | %s | user_id=%s guild_id=%s channel_id=%s message_id=%s%s",
         feature,
         action,
         uid,
@@ -366,7 +366,7 @@ def log_chat_mention_output(message: discord.Message, *, action: str, fields: st
         extra={"chat_phase": "OUTPUT", "message_source": "chat"},
     )
     chat_log.info(
-        "source=chat | [OUTPUT] | feature=%s | %s | user_id=%s guild_id=%s channel_id=%s message_id=%s%s",
+        "source=chat | feature=%s | %s | user_id=%s guild_id=%s channel_id=%s message_id=%s%s",
         feature,
         action,
         uid,
@@ -382,7 +382,7 @@ def log_chat_mention_error(message: discord.Message, *, action: str, detail: obj
     gl, uid, cid, mid = _message_ids(message)
     suffix = f" | {detail}" if detail is not None else ""
     logger.warning(
-        "source=chat | [ERROR] | feature=%s | %s | user_id=%s guild_id=%s channel_id=%s message_id=%s%s",
+        "source=chat | feature=%s | %s | user_id=%s guild_id=%s channel_id=%s message_id=%s%s",
         feature,
         action,
         uid,
@@ -393,7 +393,7 @@ def log_chat_mention_error(message: discord.Message, *, action: str, detail: obj
         extra={"chat_phase": "ERROR", "message_source": "chat"},
     )
     chat_log.warning(
-        "source=chat | [ERROR] | feature=%s | %s | user_id=%s guild_id=%s channel_id=%s message_id=%s%s",
+        "source=chat | feature=%s | %s | user_id=%s guild_id=%s channel_id=%s message_id=%s%s",
         feature,
         action,
         uid,
@@ -409,7 +409,7 @@ def log_chat_mention_ignored(message: discord.Message, *, reason: str) -> None:
     """Log @mention not acted on (e.g. not whitelisted)."""
     gl, uid, cid, mid = _message_ids(message)
     logger.info(
-        "source=chat | [IGNORE] | reason=%s | user_id=%s guild_id=%s channel_id=%s message_id=%s",
+        "source=chat | reason=%s | user_id=%s guild_id=%s channel_id=%s message_id=%s",
         reason,
         uid,
         gl,
@@ -418,7 +418,7 @@ def log_chat_mention_ignored(message: discord.Message, *, reason: str) -> None:
         extra={"chat_phase": "IGNORE", "message_source": "chat"},
     )
     chat_log.info(
-        "source=chat | [IGNORE] | reason=%s | user_id=%s guild_id=%s channel_id=%s message_id=%s",
+        "source=chat | reason=%s | user_id=%s guild_id=%s channel_id=%s message_id=%s",
         reason,
         uid,
         gl,
@@ -438,7 +438,7 @@ def log_chat_mention_received(
     """Log every addressed @mention / reply-to-bot (before gates)."""
     gl, uid, cid, mid = _message_ids(message)
     logger.info(
-        "source=chat | [RECEIVED] | via=%s | user_id=%s guild_id=%s channel_id=%s message_id=%s "
+        "source=chat | via=%s | user_id=%s guild_id=%s channel_id=%s message_id=%s "
         "whitelisted=%s message_content_intent=%s",
         via,
         uid,
@@ -450,7 +450,7 @@ def log_chat_mention_received(
         extra={"chat_phase": "RECEIVED", "message_source": "chat"},
     )
     chat_log.info(
-        "source=chat | [RECEIVED] | via=%s | user_id=%s guild_id=%s channel_id=%s message_id=%s whitelisted=%s",
+        "source=chat | via=%s | user_id=%s guild_id=%s channel_id=%s message_id=%s whitelisted=%s",
         via,
         uid,
         gl,
@@ -1210,13 +1210,13 @@ class UltronBot(commands.Bot):
             "source=chat | nl_router | classified | outcome=%s | elapsed_s=%.3f",
             type(outcome).__name__,
             elapsed,
-            extra={"chat_phase": "OUTPUT", "message_source": "chat"},
+            extra={"chat_phase": "ROUTER", "message_source": "chat"},
         )
         chat_log.info(
             "source=chat | nl_router | classified | outcome=%s | elapsed_s=%.3f",
             type(outcome).__name__,
             elapsed,
-            extra={"message_source": "chat"},
+            extra={"chat_phase": "ROUTER", "message_source": "chat"},
         )
 
         if isinstance(outcome, NLAdminRejected):
@@ -1224,11 +1224,12 @@ class UltronBot(commands.Bot):
                 "source=chat | nl_router | rejected_admin_command | command=%s user_id=%s",
                 outcome.command,
                 message.author.id,
+                extra={"chat_phase": "DENIED", "message_source": "chat"},
             )
             chat_log.warning(
                 "source=chat | nl_router | rejected_admin_command | command=%s",
                 outcome.command,
-                extra={"message_source": "chat"},
+                extra={"chat_phase": "DENIED", "message_source": "chat"},
             )
             await _nl_edit_or_reply(
                 message,
@@ -1266,13 +1267,13 @@ class UltronBot(commands.Bot):
                 "source=chat | nl_router | command_accepted | command=%s | user_id=%s",
                 outcome.command,
                 message.author.id,
-                extra={"chat_phase": "OUTPUT", "message_source": "chat"},
+                extra={"chat_phase": "ROUTER", "message_source": "chat"},
             )
             chat_log.info(
                 "source=chat | nl_router | command_accepted | command=%s | feedback=%s",
                 outcome.command,
                 _truncate_for_log(dispatch_line, 160),
-                extra={"chat_phase": "OUTPUT", "message_source": "chat"},
+                extra={"chat_phase": "ROUTER", "message_source": "chat"},
             )
             await self._run_nl_invoke(message, outcome, status_message=status_msg)
             log_chat_mention_output(
@@ -1293,8 +1294,17 @@ class UltronBot(commands.Bot):
         """Execute a validated non-admin command from the NL router."""
         cmd = inv.command
         args = inv.args
-        logger.info("source=chat | nl_router | dispatch | command=%s args=%r", cmd, args)
-        chat_log.info("source=chat | nl_router | dispatch | command=%s", cmd, extra={"message_source": "chat"})
+        logger.info(
+            "source=chat | nl_router | dispatch | command=%s args=%r",
+            cmd,
+            args,
+            extra={"chat_phase": "ROUTER", "message_source": "chat"},
+        )
+        chat_log.info(
+            "source=chat | nl_router | dispatch | command=%s",
+            cmd,
+            extra={"chat_phase": "ROUTER", "message_source": "chat"},
+        )
 
         async def _err(msg: str) -> None:
             out = await _nl_edit_or_reply(message, status_message, msg[:_DISCORD_MSG_MAX])
@@ -1626,8 +1636,16 @@ class UltronBot(commands.Bot):
         @self.tree.command(name="help", description="List available commands")
         async def help_cmd(interaction: discord.Interaction) -> None:
             log_slash_input("help", interaction)
-            await interaction.response.send_message(_HELP_TEXT, ephemeral=True)
-            log_slash_output("help", interaction, action="sent help text (ephemeral)")
+            parts = chunk_discord(_HELP_TEXT)
+            await interaction.response.send_message(parts[0][: _DISCORD_MSG_MAX], ephemeral=True)
+            for part in parts[1:]:
+                await interaction.followup.send(part[:_DISCORD_MSG_MAX], ephemeral=True)
+            log_slash_output(
+                "help",
+                interaction,
+                action="sent help text (ephemeral)",
+                fields=f"chunks={len(parts)}",
+            )
 
         @self.tree.command(name="approve", description="Approve a pending user token (admins only)")
         @app_commands.describe(token="Token from the user's /token command")
