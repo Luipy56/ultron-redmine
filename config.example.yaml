@@ -1,66 +1,153 @@
-# Ultron — example configuration (safe to commit). Copy to config.yaml and fill values.
+# Ultron — example configuration (safe to commit). Copy to config.yaml and adjust.
 # Empty strings and null use built-in defaults at runtime (see ultron/config.py).
-# llm_chain is an ordered list: position 0 = primary, then fallbacks. [] = single client from LLM_* in .env.
 
+# timezone — IANA name for report headers and date formatting; empty string loads as UTC.
+# Example: Europe/Madrid
 timezone: ""
 
 discord:
+  # ephemeral_default — If true, /summary, /ask_issue, /note default to ephemeral replies (only the user sees them). Null uses default true.
+  # Example: true
   ephemeral_default: null
+
+  # summary_status_redmine — Shown while fetching the ticket from Redmine for /summary and /ask_issue. Empty uses built-in default text.
+  # Example: "Fetching ticket from Redmine…"
   summary_status_redmine: ""
+
+  # summary_status_llm — Shown before the LLM call; {model} is replaced with the model name. Empty uses built-in default.
+  # Example: "Calling {model}…"
   summary_status_llm: ""
+
+  # llm_chain_skip_status — Template when switching to the next llm_chain provider; placeholders {from_entry}, {from_model}, {reason}, {to_entry}, {to_model}. Empty uses built-in default.
+  # Example: "**{from_entry}** failed ({reason}). Trying **{to_entry}**…"
   llm_chain_skip_status: ""
+
+  # llm_chain_all_failed_message — User-visible message when every chain provider fails.
+  # Example: "All language model providers failed. Check config and logs."
   llm_chain_all_failed_message: ""
-  # /new_issues: exact Issue status `name` from your Redmine (Administration → Issue statuses).
-  # list_limit = how many issues to show with links; min_age_days = created at least this many days ago.
+
+  # nl_commands — If true, allowlisted @mention / reply-to-bot messages are routed by an LLM to allowed commands (requires a configured LLM). Null uses default true. If false, users get a short notice that routing is disabled.
+  # Example: true
+  nl_commands: null
+
   new_issues:
+    # status_name — Exact Redmine issue status name for /new_issues (Administration → Issue statuses). Empty means not configured for listing.
+    # Example: New
     status_name: ""
+
+    # list_limit — Maximum issues to list with links.
+    # Example: 20
     list_limit: null
+
+    # min_age_days — Only issues created at least this many days ago.
+    # Example: 2
     min_age_days: null
+
   registration_log:
+    # enabled — Post operational events to a Discord channel when channel_id is set.
+    # Example: true
     enabled: null
+
+    # channel_id — Discord integer channel ID for log messages; 0 means disabled even if enabled is true.
+    # Example: 1234567890123456789
     channel_id: null
+
     features:
+      # startup — Post a line when the bot comes online (if registration_log is enabled).
+      # Example: true
       startup: null
+
+      # whitelist_events — Post when users request /token or admins approve (if enabled).
+      # Example: true
       whitelist_events: null
-  # /unassigned_issues: open + unassigned, created ≥ min_age_days ago; exclude status names matching these prefixes (case-insensitive).
+
   unassigned_open:
+    # min_age_days — For /unassigned_issues: only issues created at least this many days ago.
+    # Example: 1
     min_age_days: null
+
+    # list_limit — Cap how many issues are listed.
+    # Example: 20
     list_limit: null
+
+    # closed_status_prefixes — Exclude issues whose current status name equals or starts with any of these (case-insensitive).
+    # Example: ["Solved", "Closed", "Rejected"]
     closed_status_prefixes: []
 
 reports:
+  # channel_id — Discord channel for scheduled abandoned / stale-new reports; 0 disables posting.
+  # Example: 1234567890123456789
   channel_id: 0
 
 schedules:
   abandoned:
+    # enabled — Periodically post a report of open tickets not updated recently.
+    # Example: true
     enabled: null
+
+    # interval_hours — How often the job runs.
+    # Example: 24
     interval_hours: null
+
+    # max_days_without_update — Tickets older than this (by updated_on) are candidates.
+    # Example: 14
     max_days_without_update: null
+
+    # max_issues — Upper bound on issues considered per run.
+    # Example: 50
     max_issues: null
+
   stale_new:
+    # enabled — Periodically post “stale new” ticket candidates.
+    # Example: true
     enabled: null
+
+    # interval_hours — How often the job runs.
+    # Example: 24
     interval_hours: null
+
+    # min_age_hours — Minimum issue age to qualify.
+    # Example: 2
     min_age_hours: null
+
+    # require_unassigned — If true, only unassigned issues count.
+    # Example: true
     require_unassigned: null
+
+    # max_journal_entries — At most this many journal entries (rough “staleness” filter).
+    # Example: 1
     max_journal_entries: null
+
+    # max_issues — Upper bound per run.
+    # Example: 50
     max_issues: null
+
+    # issue_status_name — If set, restrict to issues whose Redmine status name matches (case-insensitive). Null/empty means all open issues.
+    # Example: New
     issue_status_name: null
 
 logging:
+  # log_read_messages — If true, log full prompts and ticket text (may contain secrets); use only for debugging.
+  # Example: false
   log_read_messages: null
 
+# llm_chain — Ordered providers: index 0 is primary, then fallbacks. Empty list [] means use LLM_* variables from .env instead.
+# Each entry needs base_url, model, api_key_env; optional name, enabled, timeout_seconds, max_retries.
 llm_chain: []
 
-# Replace [] with one or more mappings (all string fields non-empty except optional name).
-# Optional: enabled (default true) — set false to omit that provider from the chain without deleting the block.
-# Optional: name (labels the entry in YAML and logs), timeout_seconds, max_retries.
-# Ollama: base_url http://127.0.0.1:11434/v1, api_key_env pointing to e.g. OLLAMA_API_KEY=ollama in .env, max_retries: 0.
-#
+# Example chain (uncomment and set api_key_env to real env var names holding keys):
 # llm_chain:
-#   - name: ""
+#   - name: "local-ollama"
 #     enabled: true
-#     base_url: ""
-#     model: ""
-#     api_key_env: ""
-#     timeout_seconds: null
-#     max_retries: null
+#     base_url: "http://127.0.0.1:11434/v1"
+#     model: "llama3.2"
+#     api_key_env: "OLLAMA_API_KEY"
+#     timeout_seconds: 900
+#     max_retries: 0
+#   - name: "openai-fallback"
+#     enabled: true
+#     base_url: "https://api.openai.com/v1"
+#     model: "gpt-4o-mini"
+#     api_key_env: "OPENAI_API_KEY"
+#     timeout_seconds: 120
+#     max_retries: 2

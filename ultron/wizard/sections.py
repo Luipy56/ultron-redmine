@@ -111,6 +111,30 @@ def section_discord_bot(q: Any, state: WizardState) -> None:
         raw = _text(q, "DISCORD_APPLICATION_ID (numeric or empty)", default=aid).strip()
         state.env_set("DISCORD_APPLICATION_ID", raw)
 
+    mci = state.env_get("DISCORD_MESSAGE_CONTENT_INTENT")
+    print(
+        "DISCORD_MESSAGE_CONTENT_INTENT: set to 1 if the Developer Portal enables the privileged Message Content intent "
+        "(sometimes needed for reliable @mention handling).\n"
+        f"  Current: {mci or '(unset)'}\n"
+    )
+    if _yn(q, "Edit DISCORD_MESSAGE_CONTENT_INTENT?", default=False):
+        raw = _text(q, "DISCORD_MESSAGE_CONTENT_INTENT (empty = leave unset, or 1)", default=mci).strip()
+        state.env_set("DISCORD_MESSAGE_CONTENT_INTENT", raw)
+
+    ulnl = state.env_get("ULTRON_NL_COMMANDS")
+    print(
+        "ULTRON_NL_COMMANDS: optional; if truthy, forces natural-language @mention routing on "
+        "(same idea as discord.nl_commands: true in config.yaml).\n"
+        f"  Current: {ulnl or '(unset)'}\n"
+    )
+    if _yn(q, "Edit ULTRON_NL_COMMANDS?", default=False):
+        raw = _text(
+            q,
+            "ULTRON_NL_COMMANDS (e.g. 1 — optional env override; leave empty for no value in session)",
+            default=ulnl,
+        ).strip()
+        state.env_set("ULTRON_NL_COMMANDS", raw)
+
 
 def _dig(d: dict[str, Any], *keys: str, default: Any = None) -> Any:
     cur: Any = d
@@ -303,6 +327,20 @@ def section_yaml_behavior(q: Any, state: WizardState) -> None:
     d = _ensure_nested(y, "discord")
     if _yn(q, "Edit discord.ephemeral_default?", default=False):
         d["ephemeral_default"] = _yn(q, "Ephemeral slash replies by default?", default=True)
+
+    nl_cur = d.get("nl_commands")
+    if nl_cur is None:
+        nl_desc = "null (runtime default: true)"
+        nl_default_yn = True
+    else:
+        nl_desc = repr(nl_cur)
+        nl_default_yn = bool(nl_cur)
+    print(
+        "discord.nl_commands — LLM routes @mention / reply-to-bot messages to allowed commands (requires a configured LLM).\n"
+        f"  Current YAML value: {nl_desc}\n"
+    )
+    if _yn(q, "Edit discord.nl_commands?", default=False):
+        d["nl_commands"] = _yn(q, "Enable natural-language @mention routing?", default=nl_default_yn)
 
     ni = _ensure_nested(d, "new_issues")
     print(f"new_issues: {ni}\n")

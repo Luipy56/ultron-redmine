@@ -205,6 +205,23 @@ async def _run() -> None:
             llm.model,
             format_llm_endpoint(llm.base_url),
         )
+    if env.discord_message_content_intent:
+        log.info(
+            "Discord | message content intent: ON (privileged; portal must match — needed if mentions are empty without it)"
+        )
+    else:
+        log.info(
+            "Discord | message content intent: OFF (guild/DM message events still on; set "
+            "DISCORD_MESSAGE_CONTENT_INTENT=1 + portal if @mentions do not trigger)"
+        )
+    nl_cfg = app_cfg.discord.nl_commands or env.ultron_nl_commands
+    log.info(
+        "Discord | NL @mention routing: %s (config discord.nl_commands=%s env ULTRON_NL_COMMANDS=%s; "
+        "set discord.nl_commands false in YAML to use a fixed greeting only)",
+        "ON" if nl_cfg else "OFF",
+        app_cfg.discord.nl_commands,
+        env.ultron_nl_commands,
+    )
     bot = UltronBot(env=env, app_cfg=app_cfg, redmine=redmine, llm=llm)
     try:
         await bot.start(env.discord_token)

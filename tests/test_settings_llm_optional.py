@@ -40,6 +40,8 @@ def test_load_env_no_llm_without_api_key(monkeypatch: pytest.MonkeyPatch, minima
     assert env.llm_enabled is False
     assert env.llm_model == "(none)"
     assert env.llm_api_key == ""
+    assert env.discord_message_content_intent is False
+    assert env.ultron_nl_commands is False
 
 
 def test_load_env_llm_disabled_conflicts_with_chain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,6 +64,20 @@ def test_load_env_llm_disabled_conflicts_with_chain(tmp_path: Path, monkeypatch:
 
     with pytest.raises(RuntimeError, match="llm_chain"):
         load_env()
+
+
+def test_load_env_message_content_intent_enabled(monkeypatch: pytest.MonkeyPatch, minimal_config: Path) -> None:
+    monkeypatch.setenv("DISCORD_TOKEN", "t")
+    monkeypatch.setenv("REDMINE_URL", "https://redmine.example")
+    monkeypatch.setenv("REDMINE_API_KEY", "k")
+    monkeypatch.setenv("CONFIG_PATH", str(minimal_config))
+    monkeypatch.setenv("DISCORD_MESSAGE_CONTENT_INTENT", "1")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+
+    from ultron.settings import load_env
+
+    env = load_env()
+    assert env.discord_message_content_intent is True
 
 
 def test_load_env_explicit_llm_disabled(monkeypatch: pytest.MonkeyPatch, minimal_config: Path) -> None:

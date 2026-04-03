@@ -65,6 +65,8 @@ class DiscordConfig:
     summary_status_llm: str = _DEFAULT_SUMMARY_STATUS_LLM
     llm_chain_skip_status: str = _DEFAULT_LLM_CHAIN_SKIP_STATUS
     llm_chain_all_failed_message: str = _DEFAULT_LLM_CHAIN_ALL_FAILED
+    #: When True (default), @mention / reply uses an LLM router. Set ``false`` for a fixed short greeting only.
+    nl_commands: bool = True
     new_issues: NewIssuesSlashConfig = field(default_factory=NewIssuesSlashConfig)
     registration_log: RegistrationLogConfig = field(default_factory=RegistrationLogConfig)
     unassigned_open: UnassignedOpenConfig = field(default_factory=UnassignedOpenConfig)
@@ -291,6 +293,7 @@ def load_config(path: Path) -> AppConfig:
         llm_chain_all_failed_message=_str(
             d_raw.get("llm_chain_all_failed_message"), _DEFAULT_LLM_CHAIN_ALL_FAILED
         ),
+        nl_commands=_bool(d_raw.get("nl_commands"), True),
         new_issues=new_issues_cfg,
         registration_log=registration_log_cfg,
         unassigned_open=unassigned_open_cfg,

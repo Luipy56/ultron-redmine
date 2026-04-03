@@ -17,7 +17,20 @@ from openai import APITimeoutError
 from ultron import __version__ as _ULTRON_VERSION
 from ultron.config import AppConfig, UnassignedOpenConfig
 from ultron.jobs import run_abandoned_report, run_stale_new_report
-from ultron.llm import ChainSkipNotice, LLMBackend, LLMChainExhaustedError, safe_exc_message
+from ultron.llm import (
+    ChainSkipNotice,
+    LLMBackend,
+    LLMChainExhaustedError,
+    NoLLMConfiguredError,
+    safe_exc_message,
+)
+from ultron.nl_router import (
+    NLAdminRejected,
+    NLChat,
+    NLInvoke,
+    NLParseError,
+    run_nl_router,
+)
 from ultron.redmine import IssueNotFound, RedmineClient, RedmineError, resolve_status_id_by_name
 from ultron.settings import EnvSettings
 from ultron.state_store import (
@@ -32,6 +45,8 @@ from ultron.workflows import add_formatted_note, ask_about_issue, summarize_issu
 
 logger = logging.getLogger(__name__)
 cmd_log = logging.getLogger("ultron.commands")
+# Normal channel/DM messages (e.g. @mention replies); filter logs with: `grep ultron.chat` vs slash (`ultron.commands`).
+chat_log = logging.getLogger("ultron.chat")
 
 _TIMEOUT_USER_MSG = (
     "The language model did not respond in time. Try a shorter ticket, a faster model, "
@@ -41,6 +56,12 @@ _NO_LLM_SLASH_MSG = (
     "No language model is configured. Add **llm_chain** to `config.yaml` or set **LLM_API_KEY** and **LLM_MODEL** "
     "(and **LLM_BASE_URL**) in the environment. **`/summary`**, **`/ask_issue`**, and **`/note`** need a model."
 )
+_NL_DISABLED_MENTION_MSG = (
+    "Natural-language @mention routing is **disabled**. "
+    "Use slash commands, or ask an operator to enable **`discord.nl_commands`** / **`ULTRON_NL_COMMANDS`** and configure a language model."
+)
+# NL @mention: first reply (edited in place like slash defer → edit).
+_NL_STATUS_ROUTING = "Routing your message with the language model…"
 # User-facing window when slash replies may stop updating (team policy; Discord API limits vary).
 _DISCORD_SESSION_MINUTES = 4
 _SESSION_EXPIRED_HINT = (
@@ -78,6 +99,8 @@ _HELP_TEXT = (
 • `/ask_issue` `issue_id` `question` — Answer a question about a ticket using the issue text as context (requires a model).
 • `/note` `issue_id` `text` — Append an LLM-polished note to a ticket (requires a model).
 
+Mention Ultron (**@…**) or **Reply** to the bot (**whitelisted users only**). With **`discord.nl_commands`** or **`ULTRON_NL_COMMANDS`**, an LLM routes your message to allowed commands (not admin). If that is off, you get a short notice that routing is disabled. **Message Content** intent may be required for some clients.
+
 **Note:** If no language model is configured, **`/summary`**, **`/ask_issue`**, and **`/note`** are unavailable; Redmine listing, **`/ping`**, and registration still work.
 
 **Bot admins only**
@@ -107,27 +130,111 @@ def _slash_ids(interaction: discord.Interaction) -> tuple[str, int, int | None]:
     return guild_label, interaction.user.id, interaction.channel_id
 
 
+def _message_ids(message: discord.Message) -> tuple[str, int, int, int]:
+    """guild_id label, author_id, channel_id, message_id (for chat mention logs)."""
+    gl = str(message.guild.id) if message.guild else "DM"
+    return gl, message.author.id, message.channel.id, message.id
+
+
+def _truncate_for_log(text: str, max_len: int = 200) -> str:
+    t = text.replace("\n", " ").strip()
+    if len(t) <= max_len:
+        return t
+    return t[: max_len - 1] + "…"
+
+
+def _nl_dispatch_status_line(command: str, args: dict[str, Any]) -> str:
+    """User-visible feedback after the model chose a concrete command (second edit, before work)."""
+    if command == "ping":
+        return "Running **`/ping`**…"
+    if command == "help":
+        return "Running **`/help`**…"
+    if command == "status":
+        return "Running **`/status`**…"
+    if command == "new_issues":
+        return "Fetching **new issues** (configured Redmine status)…"
+    if command == "issues_by_status":
+        st = str(args.get("status", "")).strip()
+        if len(st) > 120:
+            st = st[:119] + "…"
+        return f"Listing issues with status **{escape_markdown(st)}**…"
+    if command == "unassigned_issues":
+        return "Fetching **unassigned** open issues…"
+    if command == "summary":
+        return f"Summarizing issue **#{int(args['issue_id'])}**…"
+    if command == "ask_issue":
+        return f"Answering about issue **#{int(args['issue_id'])}**…"
+    if command == "note":
+        return f"Adding a note to issue **#{int(args['issue_id'])}**…"
+    return f"Running **`/{escape_markdown(command)}`**…"
+
+
+async def _nl_edit_or_reply(
+    message: discord.Message,
+    status_msg: discord.Message | None,
+    content: str,
+    *,
+    mention_author: bool = False,
+) -> discord.Message | None:
+    """Prefer editing the processing bubble; otherwise reply."""
+    text = content[:_DISCORD_MSG_MAX]
+    if status_msg is not None:
+        try:
+            await status_msg.edit(content=text)
+            return status_msg
+        except discord.HTTPException:
+            pass
+    try:
+        return await message.reply(text, mention_author=mention_author)
+    except discord.HTTPException:
+        return None
+
+
+async def _reply_chunked_to_message(
+    message: discord.Message,
+    text: str,
+    *,
+    edit_first: discord.Message | None = None,
+) -> None:
+    """Reply with first chunk, then channel sends for the rest. If ``edit_first``, edit that message instead of a new reply."""
+    parts = chunk_discord(text)
+    if not parts:
+        await _nl_edit_or_reply(message, edit_first, "(empty)", mention_author=False)
+        return
+    first, *rest = parts
+    first = first[:_DISCORD_MSG_MAX]
+    if edit_first is not None:
+        try:
+            await edit_first.edit(content=first)
+        except discord.HTTPException:
+            await message.reply(first, mention_author=False)
+    else:
+        await message.reply(first, mention_author=False)
+    for part in rest:
+        await message.channel.send(part[:_DISCORD_MSG_MAX])
+
+
 def log_slash_input(command: str, interaction: discord.Interaction, *, fields: str = "") -> None:
     """Log slash **read**: Discord delivered this command to the bot."""
     gl, uid, cid = _slash_ids(interaction)
     tail = f" {fields}" if fields else ""
     logger.info(
-        "%s | slash command received from Discord | user_id=%s guild_id=%s channel_id=%s%s",
+        "source=slash | %s | slash command received from Discord | user_id=%s guild_id=%s channel_id=%s%s",
         command,
         uid,
         gl,
         cid,
         tail,
-        extra={"slash_phase": "INPUT"},
+        extra={"slash_phase": "INPUT", "message_source": "slash"},
     )
     cmd_log.info(
-        "command=%s user_id=%s guild_id=%s channel_id=%s | from Discord%s",
+        "source=slash | command=%s user_id=%s guild_id=%s channel_id=%s | from Discord%s",
         command,
         uid,
         gl,
         cid,
         tail,
-        extra={"slash_phase": "INPUT"},
+        extra={"slash_phase": "INPUT", "message_source": "slash"},
     )
 
 
@@ -142,24 +249,24 @@ def log_slash_output(
     gl, uid, cid = _slash_ids(interaction)
     tail = f" {fields}" if fields else ""
     logger.info(
-        "%s | %s | user_id=%s guild_id=%s channel_id=%s%s",
+        "source=slash | %s | %s | user_id=%s guild_id=%s channel_id=%s%s",
         command,
         action,
         uid,
         gl,
         cid,
         tail,
-        extra={"slash_phase": "OUTPUT"},
+        extra={"slash_phase": "OUTPUT", "message_source": "slash"},
     )
     cmd_log.info(
-        "command=%s user_id=%s guild_id=%s channel_id=%s | %s%s",
+        "source=slash | command=%s user_id=%s guild_id=%s channel_id=%s | %s%s",
         command,
         uid,
         gl,
         cid,
         action,
         tail,
-        extra={"slash_phase": "OUTPUT"},
+        extra={"slash_phase": "OUTPUT", "message_source": "slash"},
     )
 
 
@@ -173,14 +280,24 @@ def log_slash_error(
     gl, uid, cid = _slash_ids(interaction)
     suffix = f" | {detail}" if detail is not None else ""
     logger.warning(
-        "%s | %s | user_id=%s guild_id=%s channel_id=%s%s",
+        "source=slash | %s | %s | user_id=%s guild_id=%s channel_id=%s%s",
         command,
         action,
         uid,
         gl,
         cid,
         suffix,
-        extra={"slash_phase": "ERROR"},
+        extra={"slash_phase": "ERROR", "message_source": "slash"},
+    )
+    cmd_log.warning(
+        "source=slash | command=%s user_id=%s guild_id=%s channel_id=%s | %s%s",
+        command,
+        uid,
+        gl,
+        cid,
+        action,
+        suffix,
+        extra={"slash_phase": "ERROR", "message_source": "slash"},
     )
 
 
@@ -188,22 +305,159 @@ def log_slash_denied(command: str, interaction: discord.Interaction, *, reason: 
     """Log gate rejection (interaction_check); user does not run the command handler."""
     gl, uid, cid = _slash_ids(interaction)
     logger.info(
-        "%s | %s | user_id=%s guild_id=%s channel_id=%s",
+        "source=slash | %s | %s | user_id=%s guild_id=%s channel_id=%s",
         command,
         reason,
         uid,
         gl,
         cid,
-        extra={"slash_phase": "DENIED"},
+        extra={"slash_phase": "DENIED", "message_source": "slash"},
     )
     cmd_log.info(
-        "command=%s user_id=%s guild_id=%s channel_id=%s | %s",
+        "source=slash | command=%s user_id=%s guild_id=%s channel_id=%s | %s",
         command,
         uid,
         gl,
         cid,
         reason,
-        extra={"slash_phase": "DENIED"},
+        extra={"slash_phase": "DENIED", "message_source": "slash"},
+    )
+
+
+def log_chat_mention_input(message: discord.Message, *, fields: str = "", feature: str = "mention") -> None:
+    """Log whitelisted @mention work starting (mirrors slash ``[INPUT]``)."""
+    gl, uid, cid, mid = _message_ids(message)
+    tail = f" {fields}" if fields else ""
+    logger.info(
+        "source=chat | [INPUT] | feature=%s | user_id=%s guild_id=%s channel_id=%s message_id=%s%s",
+        feature,
+        uid,
+        gl,
+        cid,
+        mid,
+        tail,
+        extra={"chat_phase": "INPUT", "message_source": "chat"},
+    )
+    chat_log.info(
+        "source=chat | [INPUT] | feature=%s | user_id=%s guild_id=%s channel_id=%s message_id=%s%s",
+        feature,
+        uid,
+        gl,
+        cid,
+        mid,
+        tail,
+        extra={"chat_phase": "INPUT", "message_source": "chat"},
+    )
+
+
+def log_chat_mention_output(message: discord.Message, *, action: str, fields: str = "", feature: str = "mention") -> None:
+    """Log bot-visible result for a mention (mirrors slash ``[OUTPUT]``)."""
+    gl, uid, cid, mid = _message_ids(message)
+    tail = f" {fields}" if fields else ""
+    logger.info(
+        "source=chat | [OUTPUT] | feature=%s | %s | user_id=%s guild_id=%s channel_id=%s message_id=%s%s",
+        feature,
+        action,
+        uid,
+        gl,
+        cid,
+        mid,
+        tail,
+        extra={"chat_phase": "OUTPUT", "message_source": "chat"},
+    )
+    chat_log.info(
+        "source=chat | [OUTPUT] | feature=%s | %s | user_id=%s guild_id=%s channel_id=%s message_id=%s%s",
+        feature,
+        action,
+        uid,
+        gl,
+        cid,
+        mid,
+        tail,
+        extra={"chat_phase": "OUTPUT", "message_source": "chat"},
+    )
+
+
+def log_chat_mention_error(message: discord.Message, *, action: str, detail: object | None = None, feature: str = "mention") -> None:
+    gl, uid, cid, mid = _message_ids(message)
+    suffix = f" | {detail}" if detail is not None else ""
+    logger.warning(
+        "source=chat | [ERROR] | feature=%s | %s | user_id=%s guild_id=%s channel_id=%s message_id=%s%s",
+        feature,
+        action,
+        uid,
+        gl,
+        cid,
+        mid,
+        suffix,
+        extra={"chat_phase": "ERROR", "message_source": "chat"},
+    )
+    chat_log.warning(
+        "source=chat | [ERROR] | feature=%s | %s | user_id=%s guild_id=%s channel_id=%s message_id=%s%s",
+        feature,
+        action,
+        uid,
+        gl,
+        cid,
+        mid,
+        suffix,
+        extra={"chat_phase": "ERROR", "message_source": "chat"},
+    )
+
+
+def log_chat_mention_ignored(message: discord.Message, *, reason: str) -> None:
+    """Log @mention not acted on (e.g. not whitelisted)."""
+    gl, uid, cid, mid = _message_ids(message)
+    logger.info(
+        "source=chat | [IGNORE] | reason=%s | user_id=%s guild_id=%s channel_id=%s message_id=%s",
+        reason,
+        uid,
+        gl,
+        cid,
+        mid,
+        extra={"chat_phase": "IGNORE", "message_source": "chat"},
+    )
+    chat_log.info(
+        "source=chat | [IGNORE] | reason=%s | user_id=%s guild_id=%s channel_id=%s message_id=%s",
+        reason,
+        uid,
+        gl,
+        cid,
+        mid,
+        extra={"chat_phase": "IGNORE", "message_source": "chat"},
+    )
+
+
+def log_chat_mention_received(
+    message: discord.Message,
+    *,
+    via: str,
+    whitelisted: bool,
+    message_content_intent: bool,
+) -> None:
+    """Log every addressed @mention / reply-to-bot (before gates)."""
+    gl, uid, cid, mid = _message_ids(message)
+    logger.info(
+        "source=chat | [RECEIVED] | via=%s | user_id=%s guild_id=%s channel_id=%s message_id=%s "
+        "whitelisted=%s message_content_intent=%s",
+        via,
+        uid,
+        gl,
+        cid,
+        mid,
+        whitelisted,
+        message_content_intent,
+        extra={"chat_phase": "RECEIVED", "message_source": "chat"},
+    )
+    chat_log.info(
+        "source=chat | [RECEIVED] | via=%s | user_id=%s guild_id=%s channel_id=%s message_id=%s whitelisted=%s",
+        via,
+        uid,
+        gl,
+        cid,
+        mid,
+        whitelisted,
+        extra={"chat_phase": "RECEIVED", "message_source": "chat"},
     )
 
 
@@ -272,6 +526,10 @@ def _format_show_config(app_cfg: AppConfig, env: EnvSettings) -> str:
         f"closed_status_prefixes={list(app_cfg.discord.unassigned_open.closed_status_prefixes)!r}",
         f"• **reports.channel_id:** {app_cfg.reports.channel_id}",
         f"• **logging.log_read_messages:** {app_cfg.logging.log_read_messages}",
+        f"• **DISCORD_MESSAGE_CONTENT_INTENT:** {env.discord_message_content_intent} "
+        "(privileged **Message Content** intent; portal must match if true)",
+        f"• **discord.nl_commands:** {app_cfg.discord.nl_commands} "
+        "(natural-language @mention router; also env **ULTRON_NL_COMMANDS**)",
     ]
     ab = app_cfg.schedules.abandoned
     sn = app_cfg.schedules.stale_new
@@ -533,6 +791,88 @@ def _log_slash_command_failure(command: str, exc: BaseException) -> None:
     )
 
 
+async def _markdown_unassigned_open_issues(
+    *,
+    redmine: RedmineClient,
+    cfg: UnassignedOpenConfig,
+) -> tuple[str | None, str | None, int]:
+    """Build markdown body, optional error string, and issue count (-1 on fetch error)."""
+    try:
+        issues = await redmine.list_unassigned_open_issues_older_than_days(
+            min_age_days=cfg.min_age_days,
+            closed_status_prefixes=cfg.closed_status_prefixes,
+        )
+    except RedmineError as e:
+        return None, f"Redmine error: {e}", -1
+    total = len(issues)
+    if total == 0:
+        return (
+            "No **unassigned** **open** issues created at least "
+            f"**{cfg.min_age_days}** day(s) ago (within the search limit), after excluding "
+            "closed-equivalent status prefixes.",
+            None,
+            0,
+        )
+    n_show = min(cfg.list_limit, total)
+    header = (
+        f"**Unassigned open issues** (created ≥{cfg.min_age_days} days ago; "
+        "unassigned; Redmine `open`; excluding configured closed-equivalent status prefixes) · "
+        f"**{total}** total"
+    )
+    line_strs = _discord_formatted_issue_lines(issues[:n_show], redmine)
+    body = header + "\n\n" + "\n".join(line_strs)
+    rest = total - n_show
+    if rest > 0:
+        _other = "issue" if rest == 1 else "issues"
+        body += f"\n\nand **{rest}** other {_other} matching this filter."
+    return body, None, total
+
+
+async def _markdown_issues_by_status(
+    *,
+    redmine: RedmineClient,
+    status_name: str,
+    min_age_days: int,
+    list_limit: int,
+) -> tuple[str | None, str | None, int]:
+    """Build markdown, optional error, total count (-1 on error)."""
+    try:
+        sid = await resolve_status_id_by_name(redmine, status_name)
+        if sid is None:
+            return (
+                None,
+                f"No Redmine issue status named `{status_name!r}`. "
+                "Check **Administration → Issue statuses** for the exact name.",
+                -1,
+            )
+        issues = await redmine.list_issues_older_than_days(
+            status_id=sid,
+            min_age_days=min_age_days,
+        )
+    except RedmineError as e:
+        return None, f"Redmine error: {e}", -1
+    total = len(issues)
+    if total == 0:
+        return (
+            f"No issues in status `{status_name}` created at least **{min_age_days}** days ago "
+            "(within the search limit).",
+            None,
+            0,
+        )
+    n_show = min(list_limit, total)
+    header = (
+        f"**Issues with status `{status_name}`** (created ≥{min_age_days} days ago) · "
+        f"**{total}** total"
+    )
+    line_strs = _discord_formatted_issue_lines(issues[:n_show], redmine)
+    body = header + "\n\n" + "\n".join(line_strs)
+    rest = total - n_show
+    if rest > 0:
+        _other = "issue" if rest == 1 else "issues"
+        body += f"\n\nand **{rest}** other {_other} with status `{status_name}`."
+    return body, None, total
+
+
 def _discord_formatted_issue_lines(issues: list[dict[str, Any]], redmine: RedmineClient) -> list[str]:
     """Markdown lines: escaped subject + linked ``[#id](url)`` per issue."""
     line_strs: list[str] = []
@@ -562,37 +902,17 @@ async def _send_unassigned_open_issues_list(
     log_command: str,
 ) -> None:
     """List unassigned open issues past min age; interaction already deferred."""
-    try:
-        issues = await redmine.list_unassigned_open_issues_older_than_days(
-            min_age_days=cfg.min_age_days,
-            closed_status_prefixes=cfg.closed_status_prefixes,
-        )
-    except RedmineError as e:
-        await interaction.followup.send(f"Redmine error: {e}", ephemeral=ephemeral)
-        log_slash_error(log_command, interaction, action="redmine request failed", detail=e)
+    body, err, total = await _markdown_unassigned_open_issues(redmine=redmine, cfg=cfg)
+    if err is not None:
+        await interaction.followup.send(err, ephemeral=ephemeral)
+        log_slash_error(log_command, interaction, action="redmine request failed", detail=err)
         return
-    total = len(issues)
+    assert body is not None
     if total == 0:
-        await interaction.followup.send(
-            "No **unassigned** **open** issues created at least "
-            f"**{cfg.min_age_days}** day(s) ago (within the search limit), after excluding "
-            "closed-equivalent status prefixes.",
-            ephemeral=ephemeral,
-        )
+        await interaction.followup.send(body, ephemeral=ephemeral)
         log_slash_output(log_command, interaction, action="empty result", fields="total=0")
         return
     n_show = min(cfg.list_limit, total)
-    header = (
-        f"**Unassigned open issues** (created ≥{cfg.min_age_days} days ago; "
-        "unassigned; Redmine `open`; excluding configured closed-equivalent status prefixes) · "
-        f"**{total}** total"
-    )
-    line_strs = _discord_formatted_issue_lines(issues[:n_show], redmine)
-    body = header + "\n\n" + "\n".join(line_strs)
-    rest = total - n_show
-    if rest > 0:
-        _other = "issue" if rest == 1 else "issues"
-        body += f"\n\nand **{rest}** other {_other} matching this filter."
     parts = chunk_discord(body, limit=1900)
     await interaction.followup.send(parts[0], ephemeral=ephemeral, suppress_embeds=True)
     for part in parts[1:]:
@@ -616,44 +936,26 @@ async def _send_issues_older_than_days_list(
     log_command: str,
 ) -> None:
     """Fetch issues in ``status_name`` older than ``min_age_days`` and send formatted chunks (interaction already deferred)."""
-    try:
-        sid = await resolve_status_id_by_name(redmine, status_name)
-        if sid is None:
-            await interaction.followup.send(
-                f"No Redmine issue status named `{status_name!r}`. "
-                "Check **Administration → Issue statuses** for the exact name.",
-                ephemeral=ephemeral,
-            )
+    body, err, total = await _markdown_issues_by_status(
+        redmine=redmine,
+        status_name=status_name,
+        min_age_days=min_age_days,
+        list_limit=list_limit,
+    )
+    if err is not None:
+        if "No Redmine issue status named" in err:
+            await interaction.followup.send(err, ephemeral=ephemeral)
             log_slash_output(log_command, interaction, action="status name not found in Redmine")
-            return
-        issues = await redmine.list_issues_older_than_days(
-            status_id=sid,
-            min_age_days=min_age_days,
-        )
-    except RedmineError as e:
-        await interaction.followup.send(f"Redmine error: {e}", ephemeral=ephemeral)
-        log_slash_error(log_command, interaction, action="redmine request failed", detail=e)
+        else:
+            await interaction.followup.send(err, ephemeral=ephemeral)
+            log_slash_error(log_command, interaction, action="redmine request failed", detail=err)
         return
-    total = len(issues)
+    assert body is not None
     if total == 0:
-        await interaction.followup.send(
-            f"No issues in status `{status_name}` created at least **{min_age_days}** days ago "
-            "(within the search limit).",
-            ephemeral=ephemeral,
-        )
+        await interaction.followup.send(body, ephemeral=ephemeral)
         log_slash_output(log_command, interaction, action="empty result", fields="total=0")
         return
     n_show = min(list_limit, total)
-    header = (
-        f"**Issues with status `{status_name}`** (created ≥{min_age_days} days ago) · "
-        f"**{total}** total"
-    )
-    line_strs = _discord_formatted_issue_lines(issues[:n_show], redmine)
-    body = header + "\n\n" + "\n".join(line_strs)
-    rest = total - n_show
-    if rest > 0:
-        _other = "issue" if rest == 1 else "issues"
-        body += f"\n\nand **{rest}** other {_other} with status `{status_name}`."
     parts = chunk_discord(body, limit=1900)
     await interaction.followup.send(parts[0], ephemeral=ephemeral, suppress_embeds=True)
     for part in parts[1:]:
@@ -674,6 +976,36 @@ class UltronCommandTree(app_commands.CommandTree):
         return await _tree_interaction_check(bot.env, interaction)  # type: ignore[attr-defined]
 
 
+def _nl_commands_enabled(app_cfg: AppConfig, env: EnvSettings) -> bool:
+    """YAML ``discord.nl_commands`` or env ``ULTRON_NL_COMMANDS``."""
+    return app_cfg.discord.nl_commands or env.ultron_nl_commands
+
+
+async def _message_addresses_bot(client: discord.Client, message: discord.Message) -> tuple[bool, str]:
+    """True if the user pinged the bot or is replying to one of the bot's messages (Reply chains have no mention)."""
+    me = client.user
+    if me is None:
+        return False, ""
+    if me in message.mentions or me.id in message.raw_mentions:
+        return True, "mention"
+    ref = message.reference
+    if ref is None or ref.message_id is None:
+        return False, ""
+    resolved = ref.resolved
+    if resolved is None:
+        try:
+            resolved = await message.channel.fetch_message(ref.message_id)
+        except (discord.NotFound, discord.HTTPException):
+            return False, ""
+    try:
+        author = resolved.author
+    except AttributeError:
+        return False, ""
+    if author.id == me.id:
+        return True, "reply_to_bot"
+    return False, ""
+
+
 class UltronBot(commands.Bot):
     def __init__(
         self,
@@ -683,9 +1015,14 @@ class UltronBot(commands.Bot):
         redmine: RedmineClient,
         llm: LLMBackend,
     ) -> None:
-        # Slash + scheduled posts only; no Message Content intent.
+        # guild_messages / dm_messages are not privileged — required to receive MESSAGE_CREATE (on_message).
+        # message_content is privileged: only request it when DISCORD_MESSAGE_CONTENT_INTENT=1 and the portal toggle matches.
         intents = discord.Intents.none()
         intents.guilds = True
+        intents.guild_messages = True
+        intents.dm_messages = True
+        if env.discord_message_content_intent:
+            intents.message_content = True
         super().__init__(
             command_prefix=None,
             intents=intents,
@@ -759,6 +1096,328 @@ class UltronBot(commands.Bot):
                 "scheduled reports (plain issue lists when no model is configured)."
             )
         await self.logs_channel_send(f"{line1}\n{line2}{line3}", feature="startup")
+
+    async def on_message(self, discord_message: discord.Message) -> None:
+        """Respond to @mentions or replies to the bot's messages (whitelisted users); logs ``source=chat``."""
+        if discord_message.author.bot:
+            return
+        addressed, via = await _message_addresses_bot(self, discord_message)
+        if not addressed:
+            return
+        wl = is_user_whitelisted(self.env.state_dir, discord_message.author.id)
+        log_chat_mention_received(
+            discord_message,
+            via=via,
+            whitelisted=wl,
+            message_content_intent=self.env.discord_message_content_intent,
+        )
+        if not wl:
+            log_chat_mention_ignored(discord_message, reason="not whitelisted")
+            return
+
+        nl_on = _nl_commands_enabled(self.app_cfg, self.env)
+        if nl_on and self.env.llm_enabled:
+            await self._handle_nl_chat_message(discord_message, via)
+            return
+        if nl_on and not self.env.llm_enabled:
+            log_chat_mention_input(discord_message, fields="path=needs_llm", feature="nl_router")
+            try:
+                await discord_message.reply(
+                    "Natural-language routing for @mentions needs a configured **language model**. "
+                    "Use slash commands, or ask an operator to configure **llm_chain** / **LLM_*** in the environment.",
+                    mention_author=False,
+                )
+                log_chat_mention_output(
+                    discord_message,
+                    action="reply sent (needs LLM)",
+                    feature="nl_router",
+                )
+            except discord.HTTPException as e:
+                log_chat_mention_error(
+                    discord_message,
+                    action="nl router reply failed (no LLM)",
+                    detail=e,
+                    feature="nl_router",
+                )
+            return
+
+        log_chat_mention_input(discord_message, fields="path=nl_disabled", feature="nl_disabled")
+        try:
+            await discord_message.reply(_NL_DISABLED_MENTION_MSG, mention_author=False)
+            log_chat_mention_output(
+                discord_message,
+                action="reply sent (nl disabled)",
+                feature="nl_disabled",
+            )
+        except discord.HTTPException as e:
+            log_chat_mention_error(discord_message, action="reply failed", detail=e, feature="nl_disabled")
+
+    async def _handle_nl_chat_message(self, message: discord.Message, via: str) -> None:
+        """LLM router → validated dispatch (whitelist already checked)."""
+        user_text = (message.content or "").strip()
+        preview = _truncate_for_log(user_text)
+        log_chat_mention_input(
+            message,
+            fields=f"via={via} text_preview={preview!r}",
+            feature="nl_router",
+        )
+
+        status_msg: discord.Message | None = None
+        try:
+            status_msg = await message.reply(_NL_STATUS_ROUTING, mention_author=False)
+        except discord.HTTPException as e:
+            log_chat_mention_error(
+                message,
+                action="nl status bubble failed",
+                detail=e,
+                feature="nl_router",
+            )
+
+        t0 = time.monotonic()
+        try:
+            outcome = await run_nl_router(self.llm, user_text=user_text, via=via)
+        except NoLLMConfiguredError:
+            await _nl_edit_or_reply(message, status_msg, _NO_LLM_SLASH_MSG)
+            log_chat_mention_output(message, action="routed (no LLM at runtime)", feature="nl_router")
+            return
+        except (APITimeoutError, httpx.TimeoutException) as e:
+            logger.warning("nl_router LLM timeout: %s", e)
+            await _nl_edit_or_reply(message, status_msg, _TIMEOUT_USER_MSG)
+            log_chat_mention_output(message, action="routed (LLM timeout)", feature="nl_router")
+            return
+        except LLMChainExhaustedError as e:
+            logger.error(
+                "nl_router: all LLM chain providers failed | backends=%s | last=%s: %s",
+                e.provider_count,
+                type(e.last_error).__name__,
+                safe_exc_message(e.last_error),
+            )
+            await _nl_edit_or_reply(message, status_msg, self.app_cfg.discord.llm_chain_all_failed_message)
+            log_chat_mention_output(message, action="routed (LLM chain exhausted)", feature="nl_router")
+            return
+        except Exception as e:
+            logger.exception("nl_router failed: %s", e)
+            await _nl_edit_or_reply(
+                message,
+                status_msg,
+                "Could not route your message. Check bot logs.",
+            )
+            log_chat_mention_error(message, action="nl_router exception", detail=e, feature="nl_router")
+            return
+
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "source=chat | nl_router | classified | outcome=%s | elapsed_s=%.3f",
+            type(outcome).__name__,
+            elapsed,
+            extra={"chat_phase": "OUTPUT", "message_source": "chat"},
+        )
+        chat_log.info(
+            "source=chat | nl_router | classified | outcome=%s | elapsed_s=%.3f",
+            type(outcome).__name__,
+            elapsed,
+            extra={"message_source": "chat"},
+        )
+
+        if isinstance(outcome, NLAdminRejected):
+            logger.warning(
+                "source=chat | nl_router | rejected_admin_command | command=%s user_id=%s",
+                outcome.command,
+                message.author.id,
+            )
+            chat_log.warning(
+                "source=chat | nl_router | rejected_admin_command | command=%s",
+                outcome.command,
+                extra={"message_source": "chat"},
+            )
+            await _nl_edit_or_reply(
+                message,
+                status_msg,
+                "I cannot run **admin** or **token** commands from chat. "
+                "Use slash commands such as **`/approve`**, **`/remove`**, **`/show_config`**, **`/token`**.",
+            )
+            log_chat_mention_output(
+                message,
+                action="rejected admin command",
+                fields=f"command={outcome.command!r}",
+                feature="nl_router",
+            )
+            return
+        if isinstance(outcome, NLParseError):
+            await _nl_edit_or_reply(
+                message,
+                status_msg,
+                f"I could not interpret that ({outcome.detail}). Try rephrasing or use slash commands.",
+            )
+            log_chat_mention_output(message, action="parse error reply", feature="nl_router")
+            return
+        if isinstance(outcome, NLChat):
+            await _reply_chunked_to_message(message, outcome.message, edit_first=status_msg)
+            log_chat_mention_output(message, action="conversational chat reply", feature="nl_router")
+            return
+        if isinstance(outcome, NLInvoke):
+            dispatch_line = _nl_dispatch_status_line(outcome.command, outcome.args)
+            try:
+                if status_msg is not None:
+                    await status_msg.edit(content=dispatch_line)
+            except discord.HTTPException:
+                pass
+            logger.info(
+                "source=chat | nl_router | command_accepted | command=%s | user_id=%s",
+                outcome.command,
+                message.author.id,
+                extra={"chat_phase": "OUTPUT", "message_source": "chat"},
+            )
+            chat_log.info(
+                "source=chat | nl_router | command_accepted | command=%s | feedback=%s",
+                outcome.command,
+                _truncate_for_log(dispatch_line, 160),
+                extra={"chat_phase": "OUTPUT", "message_source": "chat"},
+            )
+            await self._run_nl_invoke(message, outcome, status_message=status_msg)
+            log_chat_mention_output(
+                message,
+                action="invoke completed",
+                fields=f"command={outcome.command!r}",
+                feature="nl_router",
+            )
+            return
+
+    async def _run_nl_invoke(
+        self,
+        message: discord.Message,
+        inv: NLInvoke,
+        *,
+        status_message: discord.Message | None = None,
+    ) -> None:
+        """Execute a validated non-admin command from the NL router."""
+        cmd = inv.command
+        args = inv.args
+        logger.info("source=chat | nl_router | dispatch | command=%s args=%r", cmd, args)
+        chat_log.info("source=chat | nl_router | dispatch | command=%s", cmd, extra={"message_source": "chat"})
+
+        async def _err(msg: str) -> None:
+            out = await _nl_edit_or_reply(message, status_message, msg[:_DISCORD_MSG_MAX])
+            if out is None:
+                log_chat_mention_error(
+                    message,
+                    action="nl dispatch error reply failed",
+                    feature="nl_router",
+                )
+
+        try:
+            if cmd == "ping":
+                await _nl_edit_or_reply(message, status_message, "Pong")
+                return
+            if cmd == "help":
+                await _reply_chunked_to_message(message, _HELP_TEXT, edit_first=status_message)
+                return
+            if cmd == "status":
+                await _nl_edit_or_reply(message, status_message, "Status: OK (placeholder).")
+                return
+            if cmd == "new_issues":
+                ni = self.app_cfg.discord.new_issues
+                if not ni.status_name.strip():
+                    await _err(
+                        "Set **`discord.new_issues.status_name`** in `config.yaml` to your Redmine issue status label."
+                    )
+                    return
+                body, err, _total = await _markdown_issues_by_status(
+                    redmine=self.redmine,
+                    status_name=ni.status_name.strip(),
+                    min_age_days=ni.min_age_days,
+                    list_limit=ni.list_limit,
+                )
+                if err is not None:
+                    await _err(err)
+                    return
+                assert body is not None
+                await _reply_chunked_to_message(message, body, edit_first=status_message)
+                return
+            if cmd == "issues_by_status":
+                st = str(args["status"])
+                ni = self.app_cfg.discord.new_issues
+                body, err, _total = await _markdown_issues_by_status(
+                    redmine=self.redmine,
+                    status_name=st,
+                    min_age_days=ni.min_age_days,
+                    list_limit=ni.list_limit,
+                )
+                if err is not None:
+                    await _err(err)
+                    return
+                assert body is not None
+                await _reply_chunked_to_message(message, body, edit_first=status_message)
+                return
+            if cmd == "unassigned_issues":
+                uo = self.app_cfg.discord.unassigned_open
+                body, err, _total = await _markdown_unassigned_open_issues(redmine=self.redmine, cfg=uo)
+                if err is not None:
+                    await _err(err)
+                    return
+                assert body is not None
+                await _reply_chunked_to_message(message, body, edit_first=status_message)
+                return
+            if cmd == "summary":
+                issue_id = int(args["issue_id"])
+                text = await summarize_issue(
+                    redmine=self.redmine,
+                    llm=self.llm,
+                    issue_id=issue_id,
+                    log_read_messages=self.app_cfg.logging.log_read_messages,
+                    on_before_llm=None,
+                    on_llm_chain_skip=None,
+                )
+                await _reply_chunked_to_message(message, text, edit_first=status_message)
+                return
+            if cmd == "ask_issue":
+                issue_id = int(args["issue_id"])
+                question = str(args["question"])
+                text = await ask_about_issue(
+                    redmine=self.redmine,
+                    llm=self.llm,
+                    issue_id=issue_id,
+                    question=question,
+                    log_read_messages=self.app_cfg.logging.log_read_messages,
+                    on_before_llm=None,
+                    on_llm_chain_skip=None,
+                )
+                await _reply_chunked_to_message(message, text, edit_first=status_message)
+                return
+            if cmd == "note":
+                issue_id = int(args["issue_id"])
+                raw = str(args["text"])
+                posted, url = await add_formatted_note(
+                    redmine=self.redmine,
+                    llm=self.llm,
+                    issue_id=issue_id,
+                    raw_text=raw,
+                    log_read_messages=self.app_cfg.logging.log_read_messages,
+                    on_llm_chain_skip=None,
+                    note_author_label=_discord_note_author_label(message.author),
+                )
+                excerpt = posted[:500] + ("…" if len(posted) > 500 else "")
+                reply = f"Note added to [{issue_id}]({url}).\n\n**Preview:**\n{excerpt}"
+                await _reply_chunked_to_message(message, reply, edit_first=status_message)
+                return
+        except IssueNotFound:
+            await _err("Issue not found in Redmine.")
+            return
+        except RedmineError as e:
+            logger.warning("nl dispatch RedmineError: %s", e)
+            await _err("Redmine request failed. Try again later.")
+            return
+        except (APITimeoutError, httpx.TimeoutException):
+            await _err(_TIMEOUT_USER_MSG)
+            return
+        except LLMChainExhaustedError as e:
+            logger.error("nl dispatch LLMChainExhaustedError: %s", e)
+            await _err(self.app_cfg.discord.llm_chain_all_failed_message)
+            return
+        except Exception as e:
+            logger.exception("nl dispatch failed: %s", e)
+            await _err("Something went wrong. Check bot logs.")
+            return
 
     async def setup_hook(self) -> None:
         guild = discord.Object(id=self.env.discord_guild_id) if self.env.discord_guild_id else None
@@ -1468,6 +2127,10 @@ class UltronBot(commands.Bot):
 
     async def on_ready(self) -> None:
         logger.info("Logged in as %s (%s)", self.user, self.user.id if self.user else "")
+        try:
+            await self.change_presence(status=discord.Status.online)
+        except discord.HTTPException as e:
+            logger.warning("change_presence(online) failed: %s", e)
         if not self.env.llm_enabled:
             logger.info(
                 "No language model assigned — /summary, /ask_issue, and /note are disabled; "

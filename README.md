@@ -1,8 +1,27 @@
 # 🤖 Ultron — Discord ↔ Redmine + LLM
 
-A **Discord** bot that connects **Redmine** to an **OpenAI-compatible** LLM (OpenAI, OpenRouter, local Ollama, etc.): slash-command summaries, Q&A over tickets, and polished notes, plus scheduled reports for abandoned or stale new tickets.
+A **Discord** bot that connects **Redmine** to an **OpenAI-compatible** LLM (OpenAI, OpenRouter, local Ollama, etc.): slash-command summaries, Q&A over tickets, and polished notes, plus scheduled reports for abandoned or stale new tickets. Access is **allowlisted**; optional **natural-language routing** turns @mentions into the same allowed actions when an LLM is configured.
 
 [`.env.example`](.env.example) · [`config.example.yaml`](config.example.yaml)
+
+---
+
+## Contents
+
+- [Demo](#demo)
+- [Why Ultron](#why-ultron)
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [Documentation](#documentation)
+- [Command overview](#command-overview)
+- [Environment variables](#environment-variables)
+- [Discord checklist](#discord-checklist)
+- [Redmine checklist](#redmine-checklist)
+- [LLM setup](#llm-setup)
+- [`config.yaml`](#configyaml)
+- [Slash commands](#slash-commands)
+- [Docker](#docker-optional)
+- [License](#license)
 
 ---
 
@@ -18,10 +37,12 @@ A **Discord** bot that connects **Redmine** to an **OpenAI-compatible** LLM (Ope
 
 ## Why Ultron
 
-- **🔗 Discord + Redmine** — Slash commands without leaving the server.
-- **🧠 Any OpenAI-compatible LLM** — Single `.env` or an `llm_chain` in YAML (see the example file).
-- **⏰ Reports** — Old or “new” idle tickets on a schedule from config.
-- **🔐 Allowlist** — `/summary`, `/ask_issue`, `/note`, `/ping`, and `/status` only for approved users; `/token` + `/approve` to onboard.
+- **🔗 Discord + Redmine** — Slash commands without leaving the server; fetch lists by status, unassigned open issues, summaries, Q&A, and notes.
+- **🧠 Any OpenAI-compatible LLM** — Single `.env` or an `llm_chain` in YAML (see the example file). The bot can run **without** an LLM: listing commands still work; `/summary`, `/ask_issue`, `/note`, and AI text in scheduled reports require a model.
+- **⏰ Reports** — Abandoned and stale-new ticket jobs on configurable intervals (`schedules.*` in `config.yaml`), posted to `reports.channel_id`.
+- **🔐 Allowlist** — Whitelisted users get `/summary`, `/ask_issue`, `/note`, issue listings, `/ping`, `/status`, and @mention handling; **`/token` in DM** + **`/approve`** (or `ultron add token`) onboards users.
+- **🧭 Optional NL routing** — With a configured LLM, **`discord.nl_commands`** (default **on**) lets the LLM interpret @mentions/replies into allowed commands only (never admin actions). Set **`false`** for a fixed short notice instead.
+- **📣 Optional ops channel** — **`discord.registration_log`** can post startup and whitelist events to a Discord channel for operators.
 
 ---
 
@@ -32,7 +53,7 @@ A **Discord** bot that connects **Redmine** to an **OpenAI-compatible** LLM (Ope
 | Python | **3.11+** |
 | Discord | Application with bot + token |
 | Redmine | REST API + API key |
-| LLM | `/v1/chat/completions` endpoint |
+| LLM | `/v1/chat/completions` endpoint — **optional** for Redmine-only usage |
 
 ---
 
@@ -48,9 +69,9 @@ cp config.example.yaml config.yaml   # set reports channel, timezone, etc.
 python -m ultron              # or: ultron
 ```
 
-1. **Environment:** copy [`.env.example`](.env.example) → `.env` and fill required values (Discord, Redmine, LLM). The file documents the rest.
-2. **YAML config:** copy [`config.example.yaml`](config.example.yaml) → `config.yaml`. It documents `llm_chain`, reports (`reports`, `schedules`), Discord copy, and logging.
-3. **Discord:** invite the bot with `applications.commands` and permission to post in the reports channel if you use scheduled reports.
+1. **Environment:** copy [`.env.example`](.env.example) → `.env` and fill required values (Discord, Redmine, LLM if used). The file documents the rest.
+2. **YAML config:** copy [`config.example.yaml`](config.example.yaml) → `config.yaml`. It documents `llm_chain`, reports (`reports`, `schedules`), Discord copy, registration log, and logging.
+3. **Discord:** invite the bot with `applications.commands` and permission to post in the reports channel if you use scheduled reports (and in the registration log channel if enabled).
 
 ### Configuration wizard (terminal)
 
@@ -77,7 +98,7 @@ During the wizard: **Y** / **N** / **r** (see the hint next to each prompt; **r*
 
 ---
 
-## Main commands
+## Command overview
 
 | Command | Who |
 |--------|-----|
@@ -87,19 +108,18 @@ During the wizard: **Y** / **N** / **r** (see the hint next to each prompt; **r*
 | `/new_issues` | Allowlisted — lists issues in the configured Redmine “new” status, created at least **M** days ago (`discord.new_issues` in `config.yaml`) |
 | `/issues_by_status` | Allowlisted — same listing rules as `/new_issues`, but you pass the Redmine **status** name as the option (min age & list cap still from `discord.new_issues`) |
 | `/unassigned_issues` | Allowlisted — **unassigned** issues still **open** in Redmine, created at least **N** day(s) ago, excluding status names that match configured **closed-equivalent prefixes** (`discord.unassigned_open` in `config.yaml`) |
-| `/summary`, `/ask_issue`, `/note` | Allowlisted users only |
+| `/summary`, `/ask_issue`, `/note` | Allowlisted — require a **configured LLM** |
+| `@Ultron` (mention or reply) | Allowlisted — LLM router when NL routing is enabled and an LLM is configured; otherwise a short notice. **Message Content Intent** may be required in some setups. |
 | `/token` (DM) | Request an onboarding code |
-| `/approve`, `/remove`, `/show_config` | Admins (`DISCORD_ADMIN_IDS` or `admins.json`); `/show_config` shows non-secret settings (ephemeral, only you) |
+| `/approve`, `/remove`, `/show_config` | Admins (`DISCORD_ADMIN_IDS` or `admins.json`); `/show_config` shows non-secret settings (ephemeral) |
 
 Typical access flow: user runs **`/token` in a DM** → an admin runs **`/approve`** with that token (or on the host: `ultron add token '<token>'`).
 
-```bash
-python -m ultron
-```
+---
 
-Or: `ultron` if the console script is on your `PATH`.
+## Environment variables
 
-## Environment variables (`.env`)
+Values are loaded from **`.env`** in the repository root (see [`.env.example`](.env.example)).
 
 | Variable | Required | Description |
 |----------|----------|-------------|
@@ -121,12 +141,14 @@ Or: `ultron` if the console script is on your `PATH`.
 | `ULTRON_STATE_DIR` | No | Directory for **whitelist**, **admins**, and **pending `/token` data** (default `./data`). Not committed to git; use an absolute path in production if the working directory changes. |
 | `BOT_OWNER_CONTACT` | No | Optional line (e.g. email or handle) appended to the English DM sent to users who are not whitelisted yet. |
 | `DISCORD_ADMIN_IDS` | No | Comma- or space-separated Discord user IDs that are **bot admins** (may use **`/approve`**). Merged with `admins.json` in `ULTRON_STATE_DIR`. |
+| `DISCORD_MESSAGE_CONTENT_INTENT` | No | Set to `1` / `true` / `yes` to request the privileged **Message Content** intent (must match the Developer Portal toggle). If unset, the bot still receives message events for @mentions; enable this if Discord does not populate mentions without it. |
+| `ULTRON_NL_COMMANDS` | No | If `1` / `true` / `yes`, contributes to **natural-language @mention routing** (logical **OR** with **`discord.nl_commands`** in `config.yaml`). To keep routing off, set **`discord.nl_commands: false`** and leave this unset or false. Requires a **configured LLM** for the router to run. |
 
 ## Discord checklist
 
 1. [Discord Developer Portal](https://discord.com/developers/applications) → your app → **Bot** → reset/copy token → `DISCORD_TOKEN`.
-2. Under **Bot**, enable **Privileged Gateway Intents** only if you later add features that need them; the default slash-only flow does not require Message Content Intent.
-3. OAuth2 URL Generator: scopes **`bot`** and **`applications.commands`**. Invite the bot with permission to use slash commands in your server and to **Send Messages** in the reports channel.
+2. Under **Bot**, enable **Message Content Intent** if you set **`DISCORD_MESSAGE_CONTENT_INTENT=1`** in `.env` (required for that privileged intent). Ultron always subscribes to **guild + DM messages** (non-privileged) so @mentions are delivered; if mentions still do not appear in logs, enable this toggle and the env var.
+3. OAuth2 URL Generator: scopes **`bot`** and **`applications.commands`**. Invite the bot with permission to use slash commands in your server and to **Send Messages** in the reports channel. If you use @mention replies, also allow **Read Message History** in those channels. Grant access to any **registration log** channel you configure.
 4. For faster command updates while developing, set `DISCORD_GUILD_ID` to your server ID and restart the bot after code changes.
 
 ## Redmine checklist
@@ -134,7 +156,9 @@ Or: `ultron` if the console script is on your `PATH`.
 1. Ensure REST API is enabled and your user can read/update issues in the relevant projects.
 2. Create an API key under **My account** → **API access key** → `REDMINE_API_KEY`.
 
-## LLM examples
+## LLM setup
+
+### Quick examples
 
 - **OpenAI**: `LLM_BASE_URL=https://api.openai.com/v1`, `LLM_API_KEY=sk-...`, `LLM_MODEL=gpt-4o-mini`
 - **Ollama**: `LLM_BASE_URL=http://127.0.0.1:11434/v1`, `LLM_API_KEY=ollama`, `LLM_MODEL=llama3.2`. Default timeout **900s**; override with `LLM_TIMEOUT_SECONDS`. **No SDK retries** by default when Ollama is detected.
@@ -155,24 +179,32 @@ On provider failures Ultron logs the reason (policy line), the entry’s optiona
 - If `llm_chain` is **absent or empty** (`[]`) and you **do** set `LLM_API_KEY` (or Ollama), `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` from the environment drive a single client.
 - Example block: see [`config.yaml`](config.yaml) (commented) and [`config.example.yaml`](config.example.yaml).
 
+User-visible strings when the chain switches or exhausts are customizable under **`discord.llm_chain_skip_status`** and **`discord.llm_chain_all_failed_message`** (see [`config.yaml`](#configyaml)).
+
 ## `config.yaml`
 
 - **`llm_chain`**: Optional ordered list of OpenAI-compatible backends (see [LLM provider chain](#llm-provider-chain-llm_chain-in-configyaml)). List order is priority; when non-empty, it replaces single-provider `LLM_*` env vars for LLM calls.
 - **`logging.log_read_messages`**: If `true`, the `ultron.read` logger records **full** text Ultron ingests: formatted Redmine ticket bodies, `/note` slash text, `/ask_issue` prompts, and complete LLM `system`/`user` prompts (including scheduled reports). **May contain secrets and PII**; keep `false` in production unless you are debugging in a safe environment. Default `false`.
 - **`timezone`**: Used when formatting report headers (e.g. `Europe/Madrid`, `UTC`).
-- **`discord.ephemeral_default`**: If `true`, `/summary`, `/ask_issue`, and `/note` replies are only visible to the user who ran the command.
-- **`discord.summary_status_redmine`**: Status text while loading the ticket from Redmine for **`/summary`** and **`/ask_issue`** (default: `Fetching ticket from Redmine…`).
-- **`discord.summary_status_llm`**: Status text before the LLM call for **`/summary`** and **`/ask_issue`**; use `{model}` for the configured model name (default: `Calling {model}…`).
+- **`discord.ephemeral_default`**: If `true`, `/summary`, `/ask_issue`, and `/note` default to ephemeral replies (only the user who ran the command sees them).
+- **`discord.summary_status_redmine`**: Status text while loading the ticket from Redmine for **`/summary`** and **`/ask_issue`** (built-in default: `Fetching ticket from Redmine…`).
+- **`discord.summary_status_llm`**: Status text before the LLM call for **`/summary`** and **`/ask_issue`**; use `{model}` for the configured model name (built-in default: `Passing the task to {model}…`).
+- **`discord.llm_chain_skip_status`**: Template when Ultron switches to the next `llm_chain` provider; placeholders `{from_entry}`, `{from_model}`, `{reason}`, `{to_entry}`, `{to_model}`.
+- **`discord.llm_chain_all_failed_message`**: Shown when every provider in `llm_chain` fails.
+- **`discord.nl_commands`**: Default **`true`**: whitelisted **@mention** / **Reply** messages use an **LLM router** (requires a **configured LLM**). Set **`false`** for a fixed short notice (no router). Env **`ULTRON_NL_COMMANDS`** is combined with logical **OR** (see [Environment variables](#environment-variables)).
+- **`discord.registration_log`**: Optional channel for operator visibility — **`enabled`**, **`channel_id`**, and **`features`** (`startup`, `whitelist_events`) for posting bot online and whitelist-related events.
 - **`discord.unassigned_open`**: For **`/unassigned_issues`**: **`min_age_days`** (default **1**), **`list_limit`**, and **`closed_status_prefixes`** (list of strings; an issue’s current status is excluded if its name equals or starts with any prefix, case-insensitive — e.g. `Solved` matches `Solved STAGE`).
-- **`reports.channel_id`**: Discord integer channel ID for scheduled reports. `0` disables loops (no automatic posts).
-- **`schedules.abandoned`**: Open tickets whose `updated_on` is older than `max_days_without_update` (within the first 100 issues returned by Redmine, sorted by oldest update first).
-- **`schedules.stale_new`**: Tickets at least `min_age_hours` old, optionally unassigned, with at most `max_journal_entries` journals (fetches each candidate to count journals; capped by `max_issues`). Optional **`issue_status_name`**: restrict to issues whose current Redmine **status** matches that label (exact name from **Administration → Issue statuses**, case-insensitive); if omitted, all **open** issues are considered (Redmine `status_id=open`).
+- **`discord.new_issues`**: **`status_name`**, **`list_limit`**, **`min_age_days`** for **`/new_issues`** and **`/issues_by_status`** (shared limits).
+- **`reports.channel_id`**: Discord integer channel ID for scheduled reports. `0` disables posting (loops do not run meaningfully without a channel).
+- **`schedules.abandoned`**: **`enabled`**, **`interval_hours`**, **`max_days_without_update`**, **`max_issues`** — open tickets whose `updated_on` is older than the threshold (within the first 100 issues returned by Redmine, sorted by oldest update first).
+- **`schedules.stale_new`**: **`enabled`**, **`interval_hours`**, **`min_age_hours`**, **`require_unassigned`**, **`max_journal_entries`**, **`max_issues`**, optional **`issue_status_name`** — tickets at least `min_age_hours` old, with at most `max_journal_entries` journals (fetches each candidate to count journals). If **`issue_status_name`** is unset/empty, all **open** issues are considered (Redmine `status_id=open`).
 
 Tune `max_journal_entries` for your Redmine version; some installs create more than one journal entry on creation.
 
 ## Slash commands
 
 - **`/help`** — Lists all slash commands and who may use them (ephemeral). Available to everyone.
+- **@mention** (`@Ultron`) — Not a slash command: **@mention** or **Reply** to the bot (**whitelisted users only**). With NL routing **on** and a configured LLM, an LLM maps your message to allowed commands (never admin actions); the bot **edits one status message** in place (routing → optional “running …” line → result). Otherwise a short notice that routing is disabled or that no LLM is configured. May need **`DISCORD_MESSAGE_CONTENT_INTENT=1`** + portal toggle if events are missing.
 - **`/summary issue_id`** — Loads the ticket (description + recent journals), sends context to the LLM, returns a summary. **Requires a whitelisted Discord user id** and a **configured language model** (otherwise the bot replies with setup instructions).
 - **`/ask_issue issue_id question`** — Loads the same ticket context as **`/summary`**, sends it with **`question`** to the LLM, and returns an answer grounded in the ticket text. **Requires a whitelisted user id** and a **configured model**.
 - **`/note issue_id text`** — Confirms the ticket exists, asks the LLM to polish the text, then appends it as a Redmine journal note. **Requires a whitelisted user id** and a **configured model**.
@@ -182,14 +214,15 @@ Tune `max_journal_entries` for your Redmine version; some installs create more t
 - **`/token`** — Only in a **DM** with the bot (not in server channels). If you are **already whitelisted**, the bot says so and does **not** issue a new code. Otherwise it issues a random token valid for **5 minutes** and writes a pending request under `ULTRON_STATE_DIR`. A **bot admin** can run **`/approve`** with that token, or an operator on the host can run `ultron add token <token>`.
 - **`/approve token`** — **Admins only** (see below). Consumes a pending token and adds that user’s Discord id to `whitelist.json` (same as the CLI). When you approve **in Discord**, Ultron **DMs the approved user**; **`ultron add token` on the host does not send a DM** (no Discord client in that process).
 - **`/remove user_id`** — **Admins only**. Removes that numeric Discord user id from `whitelist.json` if present; otherwise replies that they were not on the whitelist.
+- **`/show_config`** — **Admins only**. Ephemeral summary of important non-secret settings (Redmine URL, schedules, feature flags, etc.).
 
 ### Access control (whitelist)
 
-Only Discord user ids stored in `whitelist.json` (under `ULTRON_STATE_DIR`, default `./data`) may use **`/summary`**, **`/ask_issue`**, **`/note`**, **`/new_issues`**, **`/issues_by_status`**, and **`/unassigned_issues`**. That directory is listed in `.gitignore`; keep it on the server only.
+Only Discord user ids stored in `whitelist.json` (under `ULTRON_STATE_DIR`, default `./data`) may use **`/summary`**, **`/ask_issue`**, **`/note`**, **`/new_issues`**, **`/issues_by_status`**, **`/unassigned_issues`**, and **@mention** replies. That directory is listed in `.gitignore`; keep it on the server only.
 
 ### Bot admins
 
-Admins may use **`/approve`** to whitelist users and **`/remove`** to drop a user id from the whitelist, without shell access. An admin is any Discord user id in **`DISCORD_ADMIN_IDS`** and/or **`admins.json`** (same directory as `whitelist.json`, same JSON array-of-integers format as the whitelist). Use the env var for the first admin(s), or create `admins.json` on the server by hand. **Use each user’s numeric Discord id (Developer Mode → copy id);** usernames, display names, or nicknames are not accepted—if `admins.json` contains only invalid entries, no one is an admin except ids in **`DISCORD_ADMIN_IDS`**.
+Admins may use **`/approve`** to whitelist users, **`/remove`** to drop a user id from the whitelist, and **`/show_config`** to inspect safe settings, without shell access. An admin is any Discord user id in **`DISCORD_ADMIN_IDS`** and/or **`admins.json`** (same directory as `whitelist.json`, same JSON array-of-integers format as the whitelist). Use the env var for the first admin(s), or create `admins.json` on the server by hand. **Use each user’s numeric Discord id (Developer Mode → copy id);** usernames, display names, or nicknames are not accepted—if `admins.json` contains only invalid entries, no one is an admin except ids in **`DISCORD_ADMIN_IDS`**.
 
 **Bootstrap for a new user**
 

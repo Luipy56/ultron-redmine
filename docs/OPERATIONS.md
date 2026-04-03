@@ -15,9 +15,9 @@ flowchart LR
 
 | System | Role in Ultron | Code references |
 |--------|----------------|-----------------|
-| **Discord** | Slash commands, optional log channel | [`ultron/bot.py`](../ultron/bot.py), intents in `UltronBot.__init__` |
+| **Discord** | Slash commands, @mention chat replies, optional log channel | [`ultron/bot.py`](../ultron/bot.py), intents in `UltronBot.__init__` |
 | **Redmine** | Issues, journals, REST | [`ultron/redmine.py`](../ultron/redmine.py) — e.g. `GET /users/current.json` at startup |
-| **LLM** | `/summary`, `/ask_issue`, `/note`, scheduled report prose | [`ultron/llm.py`](../ultron/llm.py), [`ultron/workflows.py`](../ultron/workflows.py), [`ultron/jobs.py`](../ultron/jobs.py) |
+| **LLM** | `/summary`, `/ask_issue`, `/note`, NL @mention routing, scheduled report prose | [`ultron/llm.py`](../ultron/llm.py), [`ultron/workflows.py`](../ultron/workflows.py), [`ultron/jobs.py`](../ultron/jobs.py), [`ultron/nl_router.py`](../ultron/nl_router.py) |
 | **Environment** | Secrets and paths | [`ultron/settings.py`](../ultron/settings.py) — `load_env()` |
 | **YAML** | Schedules, Discord copy, `llm_chain` | [`ultron/config.py`](../ultron/config.py) — `load_config()` |
 
@@ -41,7 +41,8 @@ Paths:
 
 ## Discord
 
-- **Slash commands** only; Message Content Intent is not required for the default flow.
+- **Slash commands** need **guilds**. **@mention** handling uses **guild_messages** + **dm_messages** (non-privileged) so `on_message` runs. The optional **`DISCORD_MESSAGE_CONTENT_INTENT=1`** adds the privileged **message_content** intent (must match the Developer Portal); enable it if Discord does not populate `mentions` without it.
+- Logs: slash traffic is tagged **`source=slash`** (`ultron.commands`); chat mentions use **`source=chat`** (`ultron.chat`). Mention traffic is further tagged for filtering: **`[RECEIVED]`** (every addressed message), **`[IGNORE]`** (not whitelisted), **`[INPUT]`** / **`[OUTPUT]`** / **`[ERROR]`** (work on a mention), plus **`feature=`** (e.g. `nl_router`, `nl_disabled`). Natural-language routing logs **`nl_router | classified`**, **`nl_router | command_accepted`** (model chose an allowed command), and **`nl_router | dispatch`**; **admin** commands are never executed from chat (code-enforced).
 - **`DISCORD_GUILD_ID`** — If set, commands are **synced to that guild** on startup (fast updates during development). If unset, **global** sync applies (can take up to ~1 hour to appear everywhere).
 - **`DISCORD_ADMIN_IDS`** — Merged with `admins.json` under `ULTRON_STATE_DIR` for `/approve`, `/remove`, `/show_config`.
 

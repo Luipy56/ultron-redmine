@@ -108,7 +108,7 @@ def run_wizard() -> int:
         "Discord server & channels (guild, logs, reports)",
         "Admins & owner contact",
         "Language model (.env + llm_chain)",
-        "YAML: timezone, /new_issues, /unassigned_issues, schedules, logging, status strings",
+        "YAML: timezone, nl_commands, /new_issues, /unassigned_issues, schedules, logging, status strings",
         "Review & save",
         "Exit without saving",
     ]

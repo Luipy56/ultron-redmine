@@ -27,6 +27,8 @@ This document is for **people who use the bot in Discord**, not for server opera
 
 Use **`/summary`**, **`/ask_issue`**, and **`/note`** only when you are allowlisted **and** the bot has an LLM configured; otherwise the bot replies with setup instructions for operators.
 
+If you **@mention** the bot (or **reply** to one of its messages) in a channel or DM and you are allowlisted, behavior depends on host settings: with routing **on** and an LLM configured, the bot posts a short **status line** and **updates that same message** while it works (routing → running the chosen action → final answer), similar to slash “thinking” feedback. If routing is **off**, you get a brief notice instead. If nothing happens, ask your operator to confirm you are **whitelisted** and, if needed, **Message Content Intent** + **`DISCORD_MESSAGE_CONTENT_INTENT`** in the bot host configuration.
+
 ## Whitelist vs bot admins
 
 - **Whitelist** — Users who may use Redmine-related slash commands (`/summary`, `/ask_issue`, `/note`, `/new_issues`, etc.) as configured by your team.

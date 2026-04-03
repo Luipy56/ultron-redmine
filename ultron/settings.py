@@ -42,6 +42,10 @@ class EnvSettings:
     state_dir: Path
     bot_owner_contact: str | None
     discord_admin_ids: frozenset[int]
+    #: When True, request privileged Message Content + guild/DM message intents (must match Developer Portal).
+    discord_message_content_intent: bool
+    #: When True, ``ULTRON_NL_COMMANDS`` enables natural-language routing for @mention (merged with YAML ``discord.nl_commands``).
+    ultron_nl_commands: bool
 
 
 def _opt_int(name: str) -> int | None:
@@ -189,4 +193,6 @@ def load_env() -> EnvSettings:
         state_dir=state_dir,
         bot_owner_contact=bot_owner_contact,
         discord_admin_ids=_parse_discord_admin_ids(),
+        discord_message_content_intent=_env_flag_enabled("DISCORD_MESSAGE_CONTENT_INTENT"),
+        ultron_nl_commands=_env_flag_enabled("ULTRON_NL_COMMANDS"),
     )
