@@ -1,3 +1,7 @@
+# Default: bridge network. Outbound URLs use the container's stack (127.0.0.1 is the container,
+# not the host). For same URLs as bare metal (localhost LLM, SSH tunnels on the host), use:
+#   docker compose -f docker-compose.yml -f docker-compose.hostnet.yml up …
+# See README "Docker (optional)".
 services:
   ultron:
     # One bot container per host with this name; avoids a second `docker compose up` from

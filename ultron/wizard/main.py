@@ -107,7 +107,7 @@ def run_wizard() -> int:
         "Discord bot (token, application ID)",
         "Discord server & channels (guild, logs, reports)",
         "Admins & owner contact",
-        "Language model (.env + llm_chain)",
+        "Language model (llm_chain + API keys in .env)",
         "YAML: timezone, discord toggles (metadata header, slash LLM hints, nl_commands), listings, report_schedule, logging, status strings",
         "Review & save",
         "Exit without saving",

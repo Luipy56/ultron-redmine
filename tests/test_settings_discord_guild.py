@@ -26,9 +26,6 @@ def _base_env(monkeypatch: pytest.MonkeyPatch, cfg: Path) -> None:
     monkeypatch.setenv("REDMINE_API_KEY", "k")
     monkeypatch.setenv("CONFIG_PATH", str(cfg))
     monkeypatch.delenv("LLM_API_KEY", raising=False)
-    monkeypatch.delenv("LLM_BASE_URL", raising=False)
-    monkeypatch.delenv("LLM_MODEL", raising=False)
-    monkeypatch.delenv("OLLAMA_API_BASE", raising=False)
     monkeypatch.delenv("LLM_DISABLED", raising=False)
     monkeypatch.delenv("ULTRON_NO_LLM", raising=False)
 

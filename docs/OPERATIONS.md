@@ -28,7 +28,7 @@ Implemented in [`ultron/settings.py`](../ultron/settings.py):
 
 - **Config first:** `load_env()` loads `config.yaml` (see **`CONFIG_PATH`** below), then reads the process environment using **names** from optional top-level **`environment_bindings`** (defaults match `.env.example`). Only **`CONFIG_PATH`** is read before YAML.
 - **Always required (by default via those names):** `DISCORD_TOKEN`, `REDMINE_URL`, `REDMINE_API_KEY`.
-- **LLM optional:** If there is no usable `llm_chain` in `config.yaml` and no API key / Ollama-style defaults, `llm_enabled` is **false** — the bot still starts; `/summary`, `/ask_issue`, and `/note` are rejected with a clear message.
+- **LLM optional:** If there is no usable `llm_chain` in `config.yaml` (empty, omitted, or all entries disabled), `llm_enabled` is **false** — the bot still starts; `/summary`, `/ask_issue`, and `/note` are rejected with a clear message.
 - **Conflict:** `LLM_DISABLED` / `ULTRON_NO_LLM` (or the names set in `environment_bindings`) cannot be set together with a non-empty `llm_chain` (startup error).
 
 Paths:

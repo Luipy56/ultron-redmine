@@ -1,0 +1,18 @@
+# Optional override: the bot process uses the host's network stack (Linux).
+#
+# Use when LLM (or other) URLs must behave exactly like on the host without rewriting them:
+#   - http://127.0.0.1:... or localhost (Ollama, etc.)
+#   - ports that are SSH -L forwards bound on the host loopback
+#   - same HTTPS egress / DNS / VPN as the host
+#
+# Run:
+#   docker compose -f docker-compose.yml -f docker-compose.hostnet.yml up -d --build
+#
+# Docker Desktop (macOS / Windows): host networking is not equivalent to Linux; loopback and
+# tunnels on the physical machine may not match. Prefer running on Linux or without Docker for that case.
+#
+# Tradeoff: weaker network isolation; published "ports:" mappings are ignored for this service.
+
+services:
+  ultron:
+    network_mode: host

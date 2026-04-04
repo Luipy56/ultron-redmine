@@ -25,15 +25,7 @@ def test_doctor_ok_without_discord_redmine_or_llm(monkeypatch: pytest.MonkeyPatc
     cfg = tmp_path / "c.yaml"
     cfg.write_text(_MINIMAL, encoding="utf-8")
     monkeypatch.setenv("CONFIG_PATH", str(cfg))
-    for k in (
-        "DISCORD_TOKEN",
-        "REDMINE_URL",
-        "REDMINE_API_KEY",
-        "LLM_API_KEY",
-        "LLM_BASE_URL",
-        "LLM_MODEL",
-        "OLLAMA_API_BASE",
-    ):
+    for k in ("DISCORD_TOKEN", "REDMINE_URL", "REDMINE_API_KEY", "LLM_API_KEY"):
         monkeypatch.delenv(k, raising=False)
 
     from ultron.doctor import run_doctor

@@ -167,7 +167,7 @@ ChainSkipCallback = Callable[[ChainSkipNotice], Awaitable[None]]
 
 
 class LLMBackend(Protocol):
-    """Anything Ultron uses for chat completions (single provider or chain)."""
+    """Anything Ultron uses for chat completions (provider chain or null backend)."""
 
     @property
     def model(self) -> str: ...
@@ -201,7 +201,8 @@ class NullLLMBackend:
         model_override: str | None = None,
     ) -> str:
         raise NoLLMConfiguredError(
-            "No language model is configured. Set LLM_* in the environment or define llm_chain in config.yaml."
+            "No language model is configured. Add at least one enabled entry under **llm_chain** in config.yaml "
+            "(and set the API key variables named by **api_key_env** in your environment)."
         )
 
 

@@ -57,7 +57,7 @@ def test_parse_environment_bindings_rejects_empty_name(tmp_path: Path) -> None:
 
 def test_environment_bindings_frozen_defaults() -> None:
     b = EnvironmentBindings()
-    assert b.llm_api_key_env == "LLM_API_KEY"
+    assert b.llm_disabled_env == "LLM_DISABLED"
 
 
 def test_load_config_redmine_user_aliases(tmp_path: Path) -> None:

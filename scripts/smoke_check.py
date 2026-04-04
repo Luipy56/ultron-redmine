@@ -46,27 +46,31 @@ def main() -> int:
             print(f"FAIL Redmine: {e}")
             ok = False
 
-    if not env.llm_enabled or not env.llm_base_url.strip():
-        print("SKIP LLM: not configured (same rules as bot load_env)")
-        return 0 if ok else 1
-
-    llm_base = env.llm_base_url.rstrip("/")
-    model = env.llm_model
-    llm_key = env.llm_api_key
-    if not llm_base or not model or not llm_key or model == "(none)":
-        print("SKIP LLM: incomplete LLM settings")
+    if not env.llm_enabled:
+        print("SKIP LLM: not configured (no enabled llm_chain in config.yaml)")
         return 0 if ok else 1
 
     async def llm_ping() -> None:
-        from openai import AsyncOpenAI
+        from ultron.config import load_config
+        from ultron.llm import LLMChainClient, NullLLMBackend, format_llm_endpoint
+        from ultron.startup_llm import build_llm_backend
 
-        client = AsyncOpenAI(base_url=llm_base, api_key=llm_key, timeout=60.0)
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": 'Reply with exactly: pong'}],
-        )
-        text = (resp.choices[0].message.content or "").strip()
-        print(f"OK LLM: model={model!r} reply={text!r}")
+        cfg_path = Path(env.config_path).expanduser()
+        if not cfg_path.is_file():
+            print(f"SKIP LLM: config file not found ({cfg_path})")
+            return
+        cfg = load_config(cfg_path)
+        built = build_llm_backend(env, cfg)
+        llm = built.backend
+        if isinstance(llm, NullLLMBackend):
+            print("SKIP LLM: not configured")
+            return
+        if not isinstance(llm, LLMChainClient):
+            print(f"SKIP LLM: unexpected backend {type(llm).__name__}")
+            return
+        await llm.ping_primary()
+        ep = format_llm_endpoint(llm.primary_base_url)
+        print(f"OK LLM: chain primary model={llm.model!r} @ {ep}")
 
     try:
         asyncio.run(llm_ping())

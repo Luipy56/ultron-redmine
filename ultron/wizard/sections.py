@@ -264,48 +264,40 @@ def section_admins(q: Any, state: WizardState) -> None:
 
 def section_llm(q: Any, state: WizardState) -> None:
     state.ensure_yaml()
-    print("\n--- Language model (.env + llm_chain) ---\n")
+    print("\n--- Language model (llm_chain + API keys in .env) ---\n")
     print(
-        "Ultron can run without an LLM (omit API key and llm_chain) or use a single provider from .env "
-        "or an ordered top-level llm_chain in config.yaml (not under discord). Each chain entry lists "
-        "api_key_env: that must be the exact variable name in .env (not remapped by environment_bindings). "
-        "Use only one top-level llm_chain key; YAML duplicate keys keep the last value only. "
-        "Optional llm_provider / llm_model on slash commands: when llm_chain is active, autocomplete lists "
-        "slots and models; when there is no chain, one choice labels the env-based provider. "
-        "discord.slash_show_llm_option_hints enriches labels when true.\n"
+        "Ultron enables the LLM only when config.yaml has at least one enabled top-level llm_chain entry "
+        "(not under discord). Each entry sets base_url, model, and api_key_env — the literal name of an "
+        "environment variable that holds that provider's API key (set it in .env; not remapped by "
+        "environment_bindings). Use only one top-level llm_chain key; YAML duplicate keys keep the last value. "
+        "Optional llm_provider / llm_model on slash commands list configured slots and models when the chain is "
+        "non-empty. discord.slash_show_llm_option_hints enriches autocomplete labels when true.\n"
     )
     dis = state.env_get("LLM_DISABLED") or state.env_get("ULTRON_NO_LLM")
     print(f"LLM_DISABLED / ULTRON_NO_LLM: {dis or '(unset)'}\n")
     if _yn(q, "Force NO language model (LLM_DISABLED=1)?", default=False):
         state.env_set("LLM_DISABLED", "1")
-    elif _yn(q, "Clear LLM_DISABLED (enable LLM from env when keys are set)?", default=False):
+    elif _yn(q, "Clear LLM_DISABLED / ULTRON_NO_LLM (allow llm_chain when configured)?", default=False):
         state.env.pop("LLM_DISABLED", None)
         state.env.pop("ULTRON_NO_LLM", None)
 
-    print("Single-provider (.env) — leave empty to rely on llm_chain or no LLM:\n")
-    print(f"  LLM_BASE_URL: {state.env_get('LLM_BASE_URL')}")
-    print(f"  LLM_API_KEY: {mask_secret('LLM_API_KEY', state.env_get('LLM_API_KEY'))}")
-    print(f"  LLM_MODEL: {state.env_get('LLM_MODEL')}")
-    print(f"  OLLAMA_API_BASE: {state.env_get('OLLAMA_API_BASE')}\n")
-
-    if _yn(q, "Edit single-provider LLM variables?", default=False):
-        state.env_set("LLM_BASE_URL", _text(q, "LLM_BASE_URL", default=state.env_get("LLM_BASE_URL")).strip())
-        state.env_set("LLM_API_KEY", _text(q, "LLM_API_KEY", default="").strip())
-        state.env_set("LLM_MODEL", _text(q, "LLM_MODEL", default=state.env_get("LLM_MODEL")).strip())
-        state.env_set("OLLAMA_API_BASE", _text(q, "OLLAMA_API_BASE (optional)", default=state.env_get("OLLAMA_API_BASE")).strip())
-        to = _text(q, "LLM_TIMEOUT_SECONDS", default=state.env_get("LLM_TIMEOUT_SECONDS")).strip()
-        if to:
-            state.env_set("LLM_TIMEOUT_SECONDS", to)
-        mr = _text(q, "LLM_MAX_RETRIES", default=state.env_get("LLM_MAX_RETRIES")).strip()
-        if mr:
-            state.env_set("LLM_MAX_RETRIES", mr)
+    if _yn(q, "Edit a common API key variable in .env (by name)?", default=False):
+        var = _text(
+            q,
+            "Environment variable name (e.g. LLM_API_KEY, OPENAI_API_KEY)",
+            default="LLM_API_KEY",
+        ).strip()
+        if var:
+            cur = state.env_get(var) or ""
+            state.env_set(var, _text(q, f"Value for {var}", default=cur).strip())
+            print(f"{var}: {mask_secret(var, state.env_get(var) or '')}\n")
 
     y = state.yaml_data
     chain = y.get("llm_chain")
     print(f"config llm_chain: {chain if chain is not None else '[]'}\n")
     llm_opts = [
         "Skip",
-        "Use empty list (single client from LLM_* in .env)",
+        "Clear llm_chain (set [] — no LLM until you add entries again)",
         "Append one provider (advanced)",
     ]
     qu = patch_question_with_return(

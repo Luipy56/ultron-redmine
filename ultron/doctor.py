@@ -11,7 +11,7 @@ import httpx
 
 from ultron import __version__
 from ultron.config import EnvironmentBindings, load_config
-from ultron.llm import LLMChainClient, LLMClient, NullLLMBackend, format_llm_endpoint, safe_exc_message
+from ultron.llm import LLMChainClient, NullLLMBackend, format_llm_endpoint, safe_exc_message
 from ultron.redmine import RedmineClient, RedmineError
 from ultron.settings import load_env
 from ultron.startup_llm import build_llm_backend
@@ -21,7 +21,6 @@ _SECRET_BINDING_FIELDS = frozenset(
     {
         "discord_token_env",
         "redmine_api_key_env",
-        "llm_api_key_env",
     }
 )
 
@@ -119,9 +118,6 @@ def run_doctor() -> int:
                 await llm.ping_primary()
                 ep = format_llm_endpoint(llm.primary_base_url)
                 print(f"LLM: OK (chain primary model {llm.model!r} @ {ep})")
-            elif isinstance(llm, LLMClient):
-                await llm.ping_minimal()
-                print(f"LLM: OK (model {llm.model!r} @ {format_llm_endpoint(llm.base_url)})")
             else:
                 print(f"LLM: SKIP (unknown backend {type(llm).__name__})")
         except Exception as e:

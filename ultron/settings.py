@@ -6,14 +6,8 @@ from pathlib import Path
 
 from ultron.config import EnvironmentBindings, load_config
 
-# Default HTTP read timeout for LLM calls (15 min). Override via binding ``llm_timeout_seconds_env``.
-_DEFAULT_LLM_TIMEOUT_SECONDS = 900.0
-
 # When guild binding is unset or empty, slash commands sync to this guild (immediate updates).
 _DEFAULT_DISCORD_GUILD_SLASH_SYNC_ID = 788074756044750891
-
-# Placeholder when config.yaml defines llm_chain (real keys come from api_key_env entries).
-_LLM_CHAIN_PLACEHOLDER_KEY = "__llm_chain__"
 
 # Bootstrap: only this name is read without going through config.yaml.
 _CONFIG_PATH_ENV = "CONFIG_PATH"
@@ -39,11 +33,11 @@ class EnvSettings:
     redmine_api_key: str
     #: False when no LLM is configured (slash commands and Redmine still work; ``/summary`` / ``/note`` need a model).
     llm_enabled: bool
+    #: First chain entry base URL when ``llm_chain`` is active (display only; secrets come from ``api_key_env``).
     llm_base_url: str
     llm_api_key: str
+    #: First chain entry default model when ``llm_chain`` is active (display only).
     llm_model: str
-    llm_timeout_seconds: float
-    llm_max_retries: int
     config_path: str
     state_dir: Path
     bot_owner_contact: str | None
@@ -77,13 +71,6 @@ def _discord_guild_id_for_slash_sync(var_name: str) -> int | None:
     return int(raw)
 
 
-def _opt_float(var_name: str) -> float | None:
-    v = _get_env(var_name)
-    if not v:
-        return None
-    return float(v)
-
-
 def _env_flag_enabled(var_name: str) -> bool:
     v = _get_env(var_name).lower()
     return v in ("1", "true", "yes", "on")
@@ -103,18 +90,6 @@ def _parse_discord_admin_ids(var_name: str) -> frozenset[int]:
         except ValueError:
             continue
     return frozenset(out)
-
-
-def _is_local_ollama(llm_base: str, ollama_api_base_raw: str) -> bool:
-    if ollama_api_base_raw.strip():
-        return True
-    return ":11434" in llm_base
-
-
-def _ollama_openai_base(api_base: str) -> str:
-    """Ollama OpenAI-compatible API lives at {host}/v1."""
-    b = api_base.strip().rstrip("/")
-    return b if b.endswith("/v1") else f"{b}/v1"
 
 
 def load_env(*, require_discord: bool = True, require_redmine: bool = True) -> EnvSettings:
@@ -157,62 +132,23 @@ def load_env(*, require_discord: bool = True, require_redmine: bool = True) -> E
             "Remove or disable llm_chain entries, or unset those variables."
         )
 
-    ollama_api_base = _get_env(b.ollama_api_base_env)
-    llm_base = _get_env(b.llm_base_url_env).rstrip("/")
-    if not llm_base and ollama_api_base:
-        llm_base = _ollama_openai_base(ollama_api_base)
-    if not llm_base:
-        llm_base = "https://api.openai.com/v1"
-
-    llm_key = _get_env(b.llm_api_key_env)
-    if not llm_key and ollama_api_base:
-        llm_key = "ollama"
-    if not llm_key and ":11434" in llm_base:
-        llm_key = "ollama"
-    if not llm_key and has_chain:
-        llm_key = _LLM_CHAIN_PLACEHOLDER_KEY
-
-    llm_enabled: bool
-    if llm_disabled_flag:
-        llm_enabled = False
-    elif not llm_key:
-        llm_enabled = False
+    llm_enabled = bool(has_chain and not llm_disabled_flag)
+    if llm_enabled:
+        assert app_cfg.llm_chain is not None
+        first = app_cfg.llm_chain[0]
+        llm_base_url = first.base_url
+        llm_model = first.model
+        llm_api_key = ""
     else:
-        llm_enabled = True
-
-    llm_model: str
-    if not llm_enabled:
-        llm_base = ""
-        llm_key = ""
+        llm_base_url = ""
+        llm_api_key = ""
         llm_model = "(none)"
-    else:
-        if not llm_key:
-            raise RuntimeError(
-                f"LLM API key is required (environment variable {b.llm_api_key_env!r}, or Ollama base via "
-                f"{b.ollama_api_base_env!r} / :11434 in base URL, or define llm_chain in config.yaml)."
-            )
-        llm_model = _get_env(b.llm_model_env)
-        if not llm_model:
-            llm_model = _get_env(b.ollama_model_env)
-        if not llm_model:
-            llm_model = "gpt-4o-mini"
 
     state_dir_raw = _get_env(b.ultron_state_dir_env) or "data"
     state_dir = Path(state_dir_raw).expanduser().resolve()
 
     bot_raw = _get_env(b.bot_owner_contact_env)
     bot_owner_contact = bot_raw or None
-
-    ollama_raw = _get_env(b.ollama_api_base_env)
-    local_ollama = _is_local_ollama(llm_base, ollama_raw) if llm_enabled else False
-    timeout_override = _opt_float(b.llm_timeout_seconds_env)
-    llm_timeout = (
-        timeout_override if timeout_override is not None else _DEFAULT_LLM_TIMEOUT_SECONDS
-    )
-    retries_override = _opt_int(b.llm_max_retries_env)
-    llm_max_retries = (
-        retries_override if retries_override is not None else (0 if local_ollama else 2)
-    )
 
     return EnvSettings(
         discord_token=token,
@@ -221,11 +157,9 @@ def load_env(*, require_discord: bool = True, require_redmine: bool = True) -> E
         redmine_url=redmine_url,
         redmine_api_key=redmine_key,
         llm_enabled=llm_enabled,
-        llm_base_url=llm_base,
-        llm_api_key=llm_key,
+        llm_base_url=llm_base_url,
+        llm_api_key=llm_api_key,
         llm_model=llm_model,
-        llm_timeout_seconds=llm_timeout,
-        llm_max_retries=llm_max_retries,
         config_path=config_path,
         state_dir=state_dir,
         bot_owner_contact=bot_owner_contact,

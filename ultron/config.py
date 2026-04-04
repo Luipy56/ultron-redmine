@@ -16,11 +16,10 @@ _DEFAULT_LLM_CHAIN_SKIP_STATUS = (
 )
 _DEFAULT_LLM_CHAIN_ALL_FAILED = (
     "All configured language model providers failed (URLs, keys, quotas, or network). "
-    "Check **config.yaml** `llm_chain` and the bot logs. "
-    "For a single provider from `.env` only, use an empty `llm_chain: []` and fix **LLM_*** / **OLLAMA_***."
+    "Check **config.yaml** `llm_chain` (**base_url**, **model**, **api_key_env** and matching keys in `.env`) and the bot logs."
 )
 
-# Defaults for llm_chain entries (aligned with EnvSettings cloud defaults).
+# Defaults for llm_chain entries.
 _DEFAULT_LLM_CHAIN_TIMEOUT_SECONDS = 900.0
 _DEFAULT_LLM_CHAIN_MAX_RETRIES = 2
 
@@ -113,19 +112,15 @@ class RedmineConfig:
 
 @dataclass(frozen=True)
 class EnvironmentBindings:
-    """Names of process environment variables that supply runtime values (set in `.env`, systemd, etc.)."""
+    """Names of process environment variables for Discord, Redmine, and global toggles (set in `.env`, systemd, etc.).
+
+    LLM endpoints and models are configured only under YAML ``llm_chain``; each entry names its key variable via ``api_key_env`` (not remapped here).
+    """
 
     discord_token_env: str = "DISCORD_TOKEN"
     redmine_url_env: str = "REDMINE_URL"
     redmine_api_key_env: str = "REDMINE_API_KEY"
     redmine_time_activity_id_env: str = "REDMINE_TIME_ACTIVITY_ID"
-    llm_api_key_env: str = "LLM_API_KEY"
-    llm_base_url_env: str = "LLM_BASE_URL"
-    llm_model_env: str = "LLM_MODEL"
-    ollama_api_base_env: str = "OLLAMA_API_BASE"
-    ollama_model_env: str = "OLLAMA_MODEL"
-    llm_timeout_seconds_env: str = "LLM_TIMEOUT_SECONDS"
-    llm_max_retries_env: str = "LLM_MAX_RETRIES"
     llm_disabled_env: str = "LLM_DISABLED"
     ultron_no_llm_env: str = "ULTRON_NO_LLM"
     discord_guild_id_env: str = "DISCORD_GUILD_ID"
@@ -162,15 +157,6 @@ def _parse_environment_bindings(raw: Any) -> EnvironmentBindings:
         redmine_time_activity_id_env=name(
             "redmine_time_activity_id_env", defaults.redmine_time_activity_id_env
         ),
-        llm_api_key_env=name("llm_api_key_env", defaults.llm_api_key_env),
-        llm_base_url_env=name("llm_base_url_env", defaults.llm_base_url_env),
-        llm_model_env=name("llm_model_env", defaults.llm_model_env),
-        ollama_api_base_env=name("ollama_api_base_env", defaults.ollama_api_base_env),
-        ollama_model_env=name("ollama_model_env", defaults.ollama_model_env),
-        llm_timeout_seconds_env=name(
-            "llm_timeout_seconds_env", defaults.llm_timeout_seconds_env
-        ),
-        llm_max_retries_env=name("llm_max_retries_env", defaults.llm_max_retries_env),
         llm_disabled_env=name("llm_disabled_env", defaults.llm_disabled_env),
         ultron_no_llm_env=name("ultron_no_llm_env", defaults.ultron_no_llm_env),
         discord_guild_id_env=name("discord_guild_id_env", defaults.discord_guild_id_env),
@@ -533,9 +519,9 @@ def load_config(path: Path) -> AppConfig:
     if isinstance(raw_llm_chain, list) and len(raw_llm_chain) > 0 and llm_chain is None:
         warnings.warn(
             "config.yaml: `llm_chain` lists one or more entries but none are enabled (all `enabled: false`), "
-            "so no YAML chain is active. Ultron falls back to a single LLM from LLM_* environment variables "
-            "if those are set. If you expected a chain, enable an entry. If you see duplicate top-level "
-            "`llm_chain` keys, YAML uses the last one only (e.g. a trailing `llm_chain: []` removes the chain).",
+            "so no language model is configured until you enable at least one entry. "
+            "If you see duplicate top-level `llm_chain` keys, YAML uses the last one only "
+            "(e.g. a trailing `llm_chain: []` removes the chain).",
             UserWarning,
             stacklevel=2,
         )

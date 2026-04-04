@@ -126,11 +126,11 @@ The bot reads **`.env`** from the current working directory (usually the repo ro
 
 **Required:** `DISCORD_TOKEN`, `REDMINE_URL`, `REDMINE_API_KEY`.
 
-**Optional:** LLM-related vars (only if you use a model), `REDMINE_TIME_ACTIVITY_ID` (for **`/log_time`** when Redmine has multiple time activities), `CONFIG_PATH`, `ULTRON_STATE_DIR`, `DISCORD_ADMIN_IDS`, guild sync (`DISCORD_GUILD_ID`), intents, logging, etc. If you use a non-empty **`llm_chain`** in `config.yaml`, API keys normally come from the env var names listed in each chain entry (`api_key_env`), not from `LLM_API_KEY`.
+**Optional:** API keys for **`llm_chain`** (only the variable names you list as `api_key_env` in `config.yaml`), `REDMINE_TIME_ACTIVITY_ID` (for **`/log_time`** when Redmine has multiple time activities), `CONFIG_PATH`, `ULTRON_STATE_DIR`, `DISCORD_ADMIN_IDS`, guild sync (`DISCORD_GUILD_ID`), intents, logging, etc.
 
-YAML settings (Discord copy, `report_schedule`, `llm_chain`, optional **`redmine.user_id_by_login`**, …) are **not** in `.env`; use **`config.yaml`** and **[`config.example.yaml`](config.example.yaml)**.
+YAML settings (Discord copy, `report_schedule`, **`llm_chain`** base URLs and models, optional **`redmine.user_id_by_login`**, …) are **not** in `.env`; use **`config.yaml`** and **[`config.example.yaml`](config.example.yaml)**.
 
-**Environment variable names:** Optional top-level **`environment_bindings`** in `config.yaml` defines which env var **names** the bot reads for each role (Discord token, Redmine URL/key, `LLM_*`, etc.). Default names match [`.env.example`](.env.example). Secret **values** still come from the process environment (`.env`, Docker, systemd); the YAML only remaps names. `llm_chain[].api_key_env` continues to name the key variable per provider.
+**Environment variable names:** Optional top-level **`environment_bindings`** in `config.yaml` defines which env var **names** the bot reads for Discord, Redmine, and global toggles. Default names match [`.env.example`](.env.example). Secret **values** still come from the process environment (`.env`, Docker, systemd); the YAML only remaps those binding names. Each **`llm_chain`** entry names its API key variable separately via **`api_key_env`** (not remapped by `environment_bindings`).
 
 ## Discord checklist
 
@@ -146,11 +146,9 @@ YAML settings (Discord copy, `report_schedule`, `llm_chain`, optional **`redmine
 
 ## LLM setup
 
-**Single provider (`.env` only, no `llm_chain`):** set `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` (see [`.env.example`](.env.example)). Examples: **OpenAI** (`https://api.openai.com/v1` + API key), **Ollama** (`http://127.0.0.1:11434/v1`, key `ollama`), **OpenRouter** (their base URL + key).
+**Configuration:** define an ordered **`llm_chain`** list in **`config.yaml`** — each entry is OpenAI-compatible; order is try/fallback order. Set **`base_url`**, **`model`** (one string or a list; first = default; extras appear on LLM slash commands), and **`api_key_env`** (the name of an environment variable holding that provider’s key — define it in `.env`). Examples: **OpenAI** (`https://api.openai.com/v1`), **Ollama** (`http://127.0.0.1:11434/v1`, many setups use the literal key string **`ollama`**), **OpenRouter** (their base URL + key). Full schema and comments: **[`config.example.yaml`](config.example.yaml)**.
 
-**Provider chain:** define an ordered **`llm_chain`** list in **`config.yaml`** — each entry is OpenAI-compatible; order is try/fallback order. Keys are referenced by **`api_key_env`** (set those variables in `.env`). **`model`** may be one string or a list (first = default; extras appear on LLM slash commands). Full schema and comments: **[`config.example.yaml`](config.example.yaml)**.
-
-**No LLM:** leave `LLM_API_KEY` empty and use an empty or omitted `llm_chain` — listing commands and registration still work; `/summary`, `/ask_issue`, `/note`, and NL routing need a model.
+**No LLM:** use an empty list or omit **`llm_chain`** — listing commands and registration still work; `/summary`, `/ask_issue`, `/note`, and NL routing need at least one enabled chain entry and matching keys in the environment.
 
 More detail: [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
@@ -158,7 +156,7 @@ More detail: [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 Copy **[`config.example.yaml`](config.example.yaml)** → `config.yaml`. **Every key is explained in that file** (with `# Example:` lines). You do not need to duplicate that reference here.
 
-**Typical first edits:** `timezone`; `reports.channel_id` and **`report_schedule`** for automated channel listings; `discord.new_issues.status_name` (and limits) for issue listings; optional `llm_chain` or rely on `.env` LLM vars; `discord.registration_log` if you want an ops channel.
+**Typical first edits:** `timezone`; `reports.channel_id` and **`report_schedule`** for automated channel listings; `discord.new_issues.status_name` (and limits) for issue listings; optional **`llm_chain`** plus the API key env vars it references; `discord.registration_log` if you want an ops channel.
 
 **Safety:** `logging.log_read_messages: true` logs full prompts and ticket text — avoid in production unless debugging in a closed environment (default is off).
 
@@ -227,6 +225,18 @@ docker compose up -d --build
 
 **`.env`**, **`config.yaml`**, and **`data/`** are mounted from the host, not copied into image layers. Rebuilding the image does not discard them.
 
+### Network: default bridge vs host
+
+With the **default** Compose file, the container has its **own** network namespace. There is no transparent “bridge” that makes every URL resolve like on the host: `http://127.0.0.1:…` points at the **container** loopback, not the machine where you ran `docker compose`. Hitting an LLM on the host (Ollama), or on a port that is really an **SSH local forward** on the host, will fail unless you change URLs (for example to `host.docker.internal` on Linux with `extra_hosts`)—that only helps reach the **host**, not “all URLs behave as on the host.”
+
+If you need **the same URLs as a bare-metal run** (OpenAI, `localhost` / `127.0.0.1`, SSH `-L` tunnels on the host, same egress/VPN as the host), use the optional **host network** override (Linux):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.hostnet.yml up -d --build
+```
+
+See comments in [`docker-compose.hostnet.yml`](docker-compose.hostnet.yml). **Docker Desktop** (macOS/Windows) does not provide the same host-network semantics as Linux; if loopback/tunnels on the physical machine do not work, run the bot on the host or use a Linux environment.
+
 Run **exactly one** live process per **`DISCORD_TOKEN`** (one Compose service replica, or one manual `docker run`). A second copy causes Discord **10062 Unknown interaction** on slash commands and confusing mixed replies (different bot versions in the same channel).
 
 The image still bakes a template from `config.example.yaml` as a default `/app/config.yaml` when no mount is used (for example plain `docker build` / `docker run` without compose).
@@ -237,6 +247,8 @@ Manual run without Compose:
 docker build -t ultron .
 docker run --rm --env-file .env -v "$(pwd)/config.yaml:/app/config.yaml:ro" -v "$(pwd)/data:/app/data" ultron
 ```
+
+For the same **host-network** URL behavior without Compose (Linux), add `--network host` to `docker run` (mount paths unchanged).
 
 ---
 

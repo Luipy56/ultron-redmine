@@ -35,7 +35,6 @@ from ultron.llm import (
     LLMBackend,
     LLMChainClient,
     LLMChainExhaustedError,
-    LLMClient,
     NoLLMConfiguredError,
     NullLLMBackend,
     format_llm_endpoint,
@@ -79,29 +78,22 @@ _STARTUP_LOG_EXTRA: dict[str, str] = {"startup_phase": "STARTUP", "message_sourc
 
 _TIMEOUT_USER_MSG = (
     "The language model did not respond in time. Try a shorter ticket, a faster model, "
-    "or increase **LLM_TIMEOUT_SECONDS** in the bot environment."
+    "or increase **timeout_seconds** on the relevant **llm_chain** entry in `config.yaml`."
 )
 
 
-def _llm_openai_compat_user_message(app_cfg: AppConfig) -> str:
+def _llm_openai_compat_user_message() -> str:
     """User-facing hint when the OpenAI-compatible API returns a transport or HTTP error."""
-    if app_cfg.llm_chain is None:
-        return (
-            "Language model request failed (network, API key, base URL, or provider error). "
-            "Check **LLM_API_KEY**, **LLM_BASE_URL** or **OLLAMA_API_BASE**, **LLM_MODEL** in the environment "
-            "(names may differ if you use **environment_bindings** in config.yaml), then bot logs."
-        )
     return (
-        "Language model request failed (network, API key, or provider error). "
-        "Check **config.yaml** `llm_chain` (**base_url**, **api_key_env** variables in `.env`) and bot logs."
+        "Language model request failed (network, API key, base URL, or provider error). "
+        "Check **config.yaml** `llm_chain` (**base_url**, **model**, **api_key_env** and matching keys in `.env`) "
+        "and bot logs."
     )
 
 
-# Discord choice name max 100 chars; shown when there is no YAML llm_chain (single env-based client).
-_LLM_PROVIDER_CHOICE_ENV_ONLY = "Default · single provider from .env (no YAML llm_chain)"
 _NO_LLM_SLASH_MSG = (
-    "No language model is configured. Add **llm_chain** to `config.yaml` or set the LLM API key, model, and base URL "
-    "using the env var names in **`environment_bindings`** (defaults in `.env.example`). "
+    "No language model is configured. Add at least one enabled entry under **llm_chain** in `config.yaml` "
+    "(API keys live in `.env` under the variable names set by each entry's **api_key_env**). "
     "**`/summary`**, **`/ask_issue`**, and **`/note`** need a model."
 )
 _NL_DISABLED_MENTION_MSG = (
@@ -114,7 +106,7 @@ _NL_STATUS_ROUTING = "Routing your message with the language model…"
 _DISCORD_SESSION_MINUTES = 4
 _SESSION_EXPIRED_HINT = (
     f"\n\n_Your slash-command message could not be updated (Discord session expired after ~{_DISCORD_SESSION_MINUTES} minutes). "
-    "Ollama may still have been loading the model or inferring; check server logs and raise **LLM_TIMEOUT_SECONDS** if needed._"
+    "Ollama may still have been loading the model or inferring; check server logs and raise **timeout_seconds** on the **llm_chain** entry if needed._"
 )
 
 _DISCORD_MSG_MAX = 2000
@@ -169,14 +161,10 @@ def _format_status_message(
     tz = (app_cfg.timezone or "").strip() or "UTC"
 
     if isinstance(llm, NullLLMBackend) or not env.llm_enabled:
-        llm_line = "• **Language model:** off — `/summary`, `/ask_issue`, `/note`, and NL routing need a model"
+        llm_line = "• **Language model:** off — `/summary`, `/ask_issue`, `/note`, and NL routing need **llm_chain**"
     elif isinstance(llm, LLMChainClient):
-        n = len(app_cfg.llm_chain) if app_cfg.llm_chain else 1
+        n = len(app_cfg.llm_chain) if app_cfg.llm_chain else 0
         llm_line = f"• **Language model:** provider chain (**{n}** slots) · default model **`{llm.model}`**"
-    elif isinstance(llm, LLMClient):
-        llm_line = (
-            f"• **Language model:** **`{llm.model}`** @ `{format_llm_endpoint(llm.base_url)}`"
-        )
     else:
         llm_line = "• **Language model:** configured"
 
@@ -303,7 +291,7 @@ _HELP_TEXT = (
 
 **@mention** or **reply**: whitelisted only. `discord.nl_commands` / `ULTRON_NL_COMMANDS` enables LLM routing into allowed commands.
 
-Without an LLM, `/summary`, `/ask_issue`, and `/note` are unavailable; listings, `/ping`, `/rpsls`, and `/token` still work.
+Without **llm_chain**, `/summary`, `/ask_issue`, and `/note` are unavailable; listings, `/ping`, `/rpsls`, and `/token` still work.
 
 **Bot admins only**
 • `/approve` `token` — Approve a `/token` code.
@@ -769,17 +757,15 @@ def _format_show_config(app_cfg: AppConfig, env: EnvSettings) -> str:
     if not env.llm_enabled:
         lines.append(
             "• **llm:** no language model configured — **`/summary`** / **`/ask_issue`** / **`/note`** are disabled until you "
-            "add **llm_chain** or **LLM_*** env vars (scheduled channel listings still run)"
+            "add **llm_chain** (scheduled channel listings still run)"
         )
-    elif app_cfg.llm_chain:
+    else:
         lines.append("• **llm_chain:**")
+        assert app_cfg.llm_chain is not None
         for i, spec in enumerate(app_cfg.llm_chain):
             label = spec.name or f"entry[{i}]"
             models_s = ", ".join(spec.models) if len(spec.models) > 1 else spec.model
             lines.append(f"  – {label}: `{spec.base_url}` / models `{models_s}`")
-    else:
-        lines.append("• **llm:** single provider from environment (not `llm_chain`)")
-        lines.append(f"  – `{env.llm_base_url}` / model `{env.llm_model}`")
     return "\n".join(lines)
 
 
@@ -1266,7 +1252,7 @@ class UltronBot(commands.Bot):
             try:
                 await discord_message.reply(
                     "Natural-language routing for @mentions needs a configured **language model**. "
-                    "Use slash commands, or ask an operator to configure **llm_chain** / **LLM_*** in the environment.",
+                    "Use slash commands, or ask an operator to configure **llm_chain** in `config.yaml` (and API keys in `.env`).",
                     mention_author=False,
                 )
                 log_chat_mention_output(
@@ -1346,7 +1332,7 @@ class UltronBot(commands.Bot):
             await _nl_edit_or_reply(
                 message,
                 status_msg,
-                _llm_openai_compat_user_message(self.app_cfg),
+                _llm_openai_compat_user_message(),
             )
             log_chat_mention_output(message, action="routed (LLM API error)", feature="nl_router")
             return
@@ -1622,7 +1608,7 @@ class UltronBot(commands.Bot):
                 type(e).__name__,
                 safe_exc_message(e),
             )
-            await _err(_llm_openai_compat_user_message(self.app_cfg))
+            await _err(_llm_openai_compat_user_message())
             return
         except LLMChainExhaustedError as e:
             logger.error("nl dispatch LLMChainExhaustedError: %s", e)
@@ -1638,10 +1624,8 @@ class UltronBot(commands.Bot):
         if isinstance(self.llm, NullLLMBackend):
             return False, False
         chain = self.app_cfg.llm_chain
-        if chain is not None:
-            return llm_chain_slash_flags(chain)
-        # Single client from LLM_* env (no yaml llm_chain): still register options (one slot, one model).
-        return True, True
+        assert chain is not None
+        return llm_chain_slash_flags(chain)
 
     def _slash_resolve_llm_kw_display(
         self,
@@ -1660,31 +1644,7 @@ class UltronBot(commands.Bot):
         llm_provider = _opt_str(llm_provider)
         llm_model = _opt_str(llm_model)
         chain = self.app_cfg.llm_chain
-        if chain is None:
-            if not cmd_need_prov and not cmd_need_model:
-                return None, None, self.llm.model
-            if cmd_need_prov:
-                p = (llm_provider or "").strip()
-                if p and p != "0":
-                    raise ValueError(
-                        "Unknown llm_provider (no YAML llm_chain: single env-based slot only; use 0 or leave empty)."
-                    )
-            primary = self.llm.model
-            mo: str | None = None
-            display = primary
-            if cmd_need_model:
-                choice = (llm_model or "").strip()
-                allowed = (primary,)
-                if not choice:
-                    mo, display = None, primary
-                elif choice not in allowed:
-                    raise ValueError(
-                        f"Unknown model {choice!r} for env-based LLM (no YAML llm_chain). Configured: {', '.join(allowed)}."
-                    )
-                else:
-                    mo = None if choice == allowed[0] else choice
-                    display = choice
-            return None, mo, display
+        assert chain is not None
         start_idx = llm_chain_resolve_start_index(
             chain, llm_provider if cmd_need_prov else None
         )
@@ -1699,79 +1659,64 @@ class UltronBot(commands.Bot):
 
     def _slash_desc_llm_provider(self) -> str:
         chain = self.app_cfg.llm_chain
-        if self.app_cfg.discord.slash_show_llm_option_hints and chain:
+        assert chain is not None
+        if self.app_cfg.discord.slash_show_llm_option_hints:
             parts: list[str] = []
             for i, s in enumerate(chain):
                 label = (s.name or f"[{i}]").strip()
                 parts.append(f"{label} (slot {i})")
             base = "LLM to try first: " + "; ".join(parts)
             return base if len(base) <= 100 else base[:97] + "…"
-        if chain:
-            return "Configured LLM to try first (see llm_chain in config.yaml)."
-        return "Single LLM from environment variables (no YAML llm_chain); optional slot 0."
+        return "Configured LLM to try first (see llm_chain in config.yaml)."
 
     def _slash_desc_llm_model(self) -> str:
         chain = self.app_cfg.llm_chain
-        if self.app_cfg.discord.slash_show_llm_option_hints and chain:
+        assert chain is not None
+        if self.app_cfg.discord.slash_show_llm_option_hints:
             # Discord caps option descriptions at 100 chars; list every model per slot elsewhere (autocomplete).
             return (
                 "Autocomplete lists models for the selected llm_provider; see llm_chain in config.yaml."
             )[:100]
-        if chain:
-            return "Model for the selected LLM; omit for the configured default."
-        if isinstance(self.llm, LLMClient) and self.app_cfg.discord.slash_show_llm_option_hints:
-            base = f"Use autocomplete; default from LLM_MODEL ({self.llm.model})."
-            return base if len(base) <= 100 else base[:97] + "…"
-        return "Model from LLM_MODEL / OLLAMA_MODEL; omit for the configured default."
+        return "Model for the selected LLM; omit for the configured default."
 
     async def _slash_ac_llm_provider(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
         chain = self.app_cfg.llm_chain
+        assert chain is not None
         cur = (current or "").strip().lower()
-        if chain:
-            out: list[app_commands.Choice[str]] = []
-            multi = len(chain) > 1
-            for i, spec in enumerate(chain):
-                val = str(i)
-                label = (spec.name.strip() if spec.name else f"slot {i}")
-                if self.app_cfg.discord.slash_show_llm_option_hints and multi:
-                    endpoint = format_llm_endpoint(spec.base_url)
-                    label = f"{label} · {endpoint}"[:100]
-                elif self.app_cfg.discord.slash_show_llm_option_hints:
-                    label = label[:100]
-                if not cur or cur in val or cur in label.lower():
-                    out.append(app_commands.Choice(name=label[:100], value=val))
-            return out[:25]
-        if isinstance(self.llm, LLMClient):
-            label = _LLM_PROVIDER_CHOICE_ENV_ONLY
-            if not cur or cur in "0" or cur in label.lower():
-                return [app_commands.Choice(name=label[:100], value="0")]
-        return []
+        out: list[app_commands.Choice[str]] = []
+        multi = len(chain) > 1
+        for i, spec in enumerate(chain):
+            val = str(i)
+            label = (spec.name.strip() if spec.name else f"slot {i}")
+            if self.app_cfg.discord.slash_show_llm_option_hints and multi:
+                endpoint = format_llm_endpoint(spec.base_url)
+                label = f"{label} · {endpoint}"[:100]
+            elif self.app_cfg.discord.slash_show_llm_option_hints:
+                label = label[:100]
+            if not cur or cur in val or cur in label.lower():
+                out.append(app_commands.Choice(name=label[:100], value=val))
+        return out[:25]
 
     async def _slash_ac_llm_model(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
         chain = self.app_cfg.llm_chain
+        assert chain is not None
         cur = (current or "").strip().lower()
-        if chain:
-            ns = interaction.namespace
-            prov_raw = getattr(ns, "llm_provider", None)
-            try:
-                idx = llm_chain_resolve_start_index(chain, prov_raw)
-            except ValueError:
-                idx = 0
-            models = chain[idx].models
-            choices: list[app_commands.Choice[str]] = []
-            for m in models:
-                if not cur or cur in m.lower():
-                    choices.append(app_commands.Choice(name=m[:100], value=m))
-            return choices[:25]
-        if isinstance(self.llm, LLMClient):
-            m = self.llm.model
+        ns = interaction.namespace
+        prov_raw = getattr(ns, "llm_provider", None)
+        try:
+            idx = llm_chain_resolve_start_index(chain, prov_raw)
+        except ValueError:
+            idx = 0
+        models = chain[idx].models
+        choices: list[app_commands.Choice[str]] = []
+        for m in models:
             if not cur or cur in m.lower():
-                return [app_commands.Choice(name=m[:100], value=m)]
-        return []
+                choices.append(app_commands.Choice(name=m[:100], value=m))
+        return choices[:25]
 
     async def _run_slash_summary(
         self,
@@ -1924,7 +1869,7 @@ class UltronBot(commands.Bot):
             logger.warning(
                 "LLM timeout in summary for issue_id=%s: %s | "
                 "Often Ollama is still loading the model, the prompt is very large, or CPU inference is slow; "
-                "see Ollama logs. Increase LLM_TIMEOUT_SECONDS if the model can finish within one HTTP read.",
+                "see Ollama logs. Increase **timeout_seconds** on the **llm_chain** entry if the model can finish within one HTTP read.",
                 issue_id,
                 str(e),
             )
@@ -1943,7 +1888,7 @@ class UltronBot(commands.Bot):
                 type(e).__name__,
                 safe_exc_message(e),
             )
-            await summary_error(_llm_openai_compat_user_message(self.app_cfg))
+            await summary_error(_llm_openai_compat_user_message())
         except Exception as e:
             _log_slash_command_failure("summary", e)
             await summary_error("Something went wrong. Check bot logs.")
@@ -2102,7 +2047,7 @@ class UltronBot(commands.Bot):
             logger.warning(
                 "LLM timeout in ask_issue for issue_id=%s: %s | "
                 "Often Ollama is still loading the model, the prompt is very large, or CPU inference is slow; "
-                "see Ollama logs. Increase LLM_TIMEOUT_SECONDS if the model can finish within one HTTP read.",
+                "see Ollama logs. Increase **timeout_seconds** on the **llm_chain** entry if the model can finish within one HTTP read.",
                 issue_id,
                 str(e),
             )
@@ -2121,7 +2066,7 @@ class UltronBot(commands.Bot):
                 type(e).__name__,
                 safe_exc_message(e),
             )
-            await ask_issue_error(_llm_openai_compat_user_message(self.app_cfg))
+            await ask_issue_error(_llm_openai_compat_user_message())
         except Exception as e:
             _log_slash_command_failure("ask_issue", e)
             await ask_issue_error("Something went wrong. Check bot logs.")
@@ -2241,7 +2186,7 @@ class UltronBot(commands.Bot):
             logger.warning(
                 "LLM timeout in note for issue_id=%s: %s | "
                 "Often Ollama is still loading the model or inference is slow; see Ollama logs. "
-                "Increase LLM_TIMEOUT_SECONDS if needed.",
+                "Increase **timeout_seconds** on the **llm_chain** entry if needed.",
                 issue_id,
                 str(e),
             )
@@ -2260,7 +2205,7 @@ class UltronBot(commands.Bot):
                 type(e).__name__,
                 safe_exc_message(e),
             )
-            await note_error(_llm_openai_compat_user_message(self.app_cfg))
+            await note_error(_llm_openai_compat_user_message())
         except Exception as e:
             _log_slash_command_failure("note", e)
             await note_error("Something went wrong. Check bot logs.")

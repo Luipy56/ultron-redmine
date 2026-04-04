@@ -159,7 +159,7 @@ def main() -> None:
 async def _run() -> None:
     from ultron.bot import UltronBot
     from ultron.config import load_config
-    from ultron.llm import LLMChainClient, NullLLMBackend, format_llm_endpoint
+    from ultron.llm import format_llm_endpoint
     from ultron.redmine import RedmineClient, RedmineError
     from ultron.settings import load_env
     from ultron.startup_llm import build_llm_backend
@@ -219,17 +219,10 @@ async def _run() -> None:
                 llm.model,
                 extra=_su,
             )
-        elif isinstance(llm, NullLLMBackend):
-            log.info(
-                "LLM not configured | backend=none | Redmine slash commands and registration work; "
-                "/summary, /ask_issue, and /note require a language model",
-                extra=_su,
-            )
         else:
             log.info(
-                "LLM configured | backend=single | model=%r | endpoint=%s",
-                llm.model,
-                format_llm_endpoint(llm.base_url),
+                "LLM not configured | backend=none | Redmine slash commands and registration work; "
+                "/summary, /ask_issue, and /note require llm_chain in config.yaml",
                 extra=_su,
             )
         if env.discord_message_content_intent:

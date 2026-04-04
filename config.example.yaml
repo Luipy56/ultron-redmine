@@ -1,7 +1,7 @@
 # Ultron — example configuration (safe to commit). Copy to config.yaml and adjust.
 # Empty strings and null use built-in defaults at runtime (see ultron/config.py).
 
-# environment_bindings — Optional. Declares which **process environment variable names** supply Discord, Redmine, and LLM settings (defaults match `.env.example`). Put secret **values** in `.env` or your host environment — never commit them in this file. Each key overrides the default name for that role; omit the whole block to use built-in names (see `EnvironmentBindings` in `ultron/config.py`).
+# environment_bindings — Optional. Declares which **process environment variable names** supply Discord, Redmine, and global toggles (defaults match `.env.example`). Put secret **values** in `.env` or your host environment — never commit them in this file. Each key overrides the default name for that role; omit the whole block to use built-in names (see `EnvironmentBindings` in `ultron/config.py`). LLM endpoints and models live only under `llm_chain`; API key variable **names** per provider are set there (`api_key_env`), not in this block.
 # Example: store the Redmine key under a custom name in `.env`:
 # environment_bindings:
 #   redmine_api_key_env: MY_REDMINE_KEY
@@ -49,7 +49,7 @@ discord:
   # Example: true
   nl_commands: null
 
-  # slash_show_llm_option_hints — If true, richer llm_provider autocomplete when llm_chain is active (endpoint when multiple slots) and clearer llm_model hints. When there is no YAML llm_chain, llm_provider still shows one choice for the single env-based provider. Null uses default false.
+  # slash_show_llm_option_hints — If true, richer llm_provider autocomplete when llm_chain is active (endpoint when multiple slots) and clearer llm_model hints. Null uses default false.
   # Example: true
   slash_show_llm_option_hints: null
 
@@ -138,11 +138,11 @@ logging:
 
 # llm_chain — Top-level key only (not under discord). Ordered OpenAI-compatible providers: index 0 is primary, then fallbacks.
 # Use exactly one top-level `llm_chain` key in this file; YAML duplicate keys are invalid for humans — the parser keeps the last value only, so a stray `llm_chain: []` after your list wipes the chain.
-# Empty list [] or omit the key → single provider from process environment: LLM_* (or names overridden by environment_bindings above).
+# Empty list [] or omit the key → no LLM (NullLLMBackend); `/summary`, `/ask_issue`, `/note`, and NL routing stay disabled until you add at least one enabled entry.
 # Each entry requires base_url, model, api_key_env; optional name, enabled, timeout_seconds, max_retries.
-# api_key_env — Literal environment variable name whose value is the API key for that slot. It is read with os.environ; it is NOT remapped by environment_bindings (bindings only affect default DISCORD_/REDMINE_/LLM_* names for the env-only path). Your .env must define the variable named here.
+# api_key_env — Literal environment variable name whose value is the API key for that slot (read with os.environ; not remapped by environment_bindings). Define that variable in `.env`.
 # model — Single string or ordered list of strings; first is the default for that provider; extras appear in llm_model autocomplete when llm_chain is active.
-# enabled: false — Entry is skipped; if every entry is disabled, Ultron behaves as if there were no chain (falls back to LLM_* env) and emits a startup warning.
+# enabled: false — Entry is skipped; if every entry is disabled, Ultron behaves as if there were no chain.
 llm_chain: []
 
 # Example chain (uncomment as a single block; set api_key_env to names that exist in your .env):
