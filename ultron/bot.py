@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -18,6 +19,7 @@ from discord.utils import escape_markdown
 from openai import APITimeoutError
 
 from ultron import __version__ as _ULTRON_VERSION
+from ultron.discord_interaction_errors import is_unknown_interaction_error
 from ultron.config import (
     AppConfig,
     UnassignedOpenConfig,
@@ -30,6 +32,7 @@ from ultron.report_schedule import build_reports_startup_message, run_report_sch
 from ultron.llm import (
     ChainSkipNotice,
     LLMBackend,
+    LLMChainClient,
     LLMChainExhaustedError,
     LLMClient,
     NoLLMConfiguredError,
@@ -44,7 +47,7 @@ from ultron.nl_router import (
     NLParseError,
     run_nl_router,
 )
-from ultron.redmine import IssueNotFound, RedmineClient, RedmineError
+from ultron.redmine import IssueNotFound, RedmineClient, RedmineError, resolve_time_activity_id
 from ultron.rpsls import MOVES, judge
 from ultron.settings import EnvSettings
 from ultron.state_store import (
@@ -70,8 +73,9 @@ _TIMEOUT_USER_MSG = (
     "or increase **LLM_TIMEOUT_SECONDS** in the bot environment."
 )
 _NO_LLM_SLASH_MSG = (
-    "No language model is configured. Add **llm_chain** to `config.yaml` or set **LLM_API_KEY** and **LLM_MODEL** "
-    "(and **LLM_BASE_URL**) in the environment. **`/summary`**, **`/ask_issue`**, and **`/note`** need a model."
+    "No language model is configured. Add **llm_chain** to `config.yaml` or set the LLM API key, model, and base URL "
+    "using the env var names in **`environment_bindings`** (defaults in `.env.example`). "
+    "**`/summary`**, **`/ask_issue`**, and **`/note`** need a model."
 )
 _NL_DISABLED_MENTION_MSG = (
     "Natural-language @mention routing is **disabled**. "
@@ -87,7 +91,109 @@ _SESSION_EXPIRED_HINT = (
 )
 
 _DISCORD_MSG_MAX = 2000
-_STATUS_REPLY = f"Connected! {_ULTRON_VERSION}"
+
+
+def _format_uptime_brief(start_utc: datetime) -> str:
+    """Short uptime like ``2d 5h`` or ``<1 min`` for status text."""
+    now = datetime.now(timezone.utc)
+    s = start_utc
+    if s.tzinfo is None:
+        s = s.replace(tzinfo=timezone.utc)
+    secs = max(0, int((now - s).total_seconds()))
+    if secs < 60:
+        return "<1 min"
+    d, r = divmod(secs, 86400)
+    h, r = divmod(r, 3600)
+    m, _ = divmod(r, 60)
+    parts: list[str] = []
+    if d:
+        parts.append(f"{d}d")
+    if h:
+        parts.append(f"{h}h")
+    if m or not parts:
+        parts.append(f"{m}m")
+    return " ".join(parts)
+
+
+def _format_status_message(
+    *,
+    env: EnvSettings,
+    app_cfg: AppConfig,
+    llm: LLMBackend,
+    bot: discord.Client,
+    ready_at_utc: datetime | None,
+    guild: discord.Guild | None,
+) -> str:
+    """User-facing `/status` body: readable overview, no secrets."""
+    ru = urlparse(env.redmine_url)
+    redmine_host = ru.netloc or env.redmine_url.rstrip("/")
+
+    where = (
+        "Direct message"
+        if guild is None
+        else f"In server: **{escape_markdown(guild.name)}**"
+    )
+
+    lat = getattr(bot, "latency", 0.0) or 0.0
+    latency_s = f"{round(lat * 1000)} ms" if lat > 0 else "—"
+
+    uptime_s = _format_uptime_brief(ready_at_utc) if ready_at_utc is not None else "—"
+
+    tz = (app_cfg.timezone or "").strip() or "UTC"
+
+    if isinstance(llm, NullLLMBackend) or not env.llm_enabled:
+        llm_line = "• **Language model:** off — `/summary`, `/ask_issue`, `/note`, and NL routing need a model"
+    elif isinstance(llm, LLMChainClient):
+        n = len(app_cfg.llm_chain) if app_cfg.llm_chain else 1
+        llm_line = f"• **Language model:** provider chain (**{n}** slots) · default model **`{llm.model}`**"
+    elif isinstance(llm, LLMClient):
+        llm_line = (
+            f"• **Language model:** **`{llm.model}`** @ `{format_llm_endpoint(llm.base_url)}`"
+        )
+    else:
+        llm_line = "• **Language model:** configured"
+
+    nl_on = _nl_commands_enabled(app_cfg, env)
+    nl_line = "• **@mention routing:** on (LLM maps mentions to allowed commands)" if nl_on else "• **@mention routing:** off"
+
+    nj = len(app_cfg.report_schedule)
+    if nj == 0:
+        reports_line = "• **Scheduled channel reports:** none"
+    elif app_cfg.reports.channel_id:
+        reports_line = f"• **Scheduled channel reports:** **{nj}** job(s) → configured channel"
+    else:
+        reports_line = (
+            f"• **Scheduled channel reports:** **{nj}** job(s) (set **`reports.channel_id`** to post)"
+        )
+
+    bot_user = bot.user
+    bot_label = f"`{bot_user.name}`" if bot_user else "Ultron"
+    bot_id = f"`{bot_user.id}`" if bot_user else "—"
+
+    lines = [
+        f"### Ultron · `v{_ULTRON_VERSION}`",
+        "",
+        f"You are {where}.",
+        "",
+        "**Connection**",
+        f"• **Discord gateway latency:** {latency_s}",
+        f"• **Uptime:** {uptime_s}",
+        "",
+        "**Integrations**",
+        f"• **Redmine:** `{redmine_host}`",
+        llm_line,
+        "",
+        "**Features**",
+        nl_line,
+        reports_line,
+        f"• **Report timezone:** `{tz}`",
+        "",
+        "**This bot**",
+        f"• {bot_label} · id {bot_id}",
+        "",
+        "_Bot admins: use `/show_config` for non-secret configuration detail._",
+    ]
+    return "\n".join(lines)
 
 _RPSLS_DISPLAY: dict[str, str] = {
     "rock": "Rock",
@@ -146,11 +252,12 @@ _HELP_TEXT = (
 
 **Whitelisted users**
 • `/ping` — Quick check; replies are public in servers. Non-whitelisted users are denied like for other gated commands.
-• `/status` — Bot up and version.
+• `/status` — Summary: version, uptime, latency, Redmine host, LLM, NL routing, scheduled reports.
 • `/rpsls` `move` — Rock–paper–scissors–lizard–Spock vs the bot.
 • `/list_new_issues` — Issues in the configured “new” status past the minimum age (see `discord.new_issues`).
 • `/issues_by_status` `status` — Same style of list for a Redmine status name (limits from `discord.new_issues`).
 • `/list_unassigned_issues` — Unassigned open issues past the minimum age (`discord.unassigned_open`).
+• `/log_time` `issue_id` `hours` — Log spent hours on a Redmine issue (time is booked as the **Redmine API key** user; see **REDMINE_TIME_ACTIVITY_ID** in `.env` when Redmine has several activities).
 • `/summary` `issue_id` [`llm_provider`] [`llm_model`] — Ticket summary (requires LLM). Optional provider/model: autocomplete when configured; omit for defaults.
 • `/ask_issue` `issue_id` `question` [`llm_provider`] [`llm_model`] — Answer from the ticket text (requires LLM).
 • `/note` `issue_id` `text` [`llm_provider`] [`llm_model`] — Append an LLM-polished note (requires LLM).
@@ -222,6 +329,10 @@ def _nl_dispatch_status_line(command: str, args: dict[str, Any]) -> str:
         return f"Answering about issue **#{int(args['issue_id'])}**…"
     if command == "note":
         return f"Adding a note to issue **#{int(args['issue_id'])}**…"
+    if command == "log_time":
+        return (
+            f"Logging **{float(args['hours']):g}** h on issue **#{int(args['issue_id'])}**…"
+        )
     return f"Running **`/{escape_markdown(command)}`**…"
 
 
@@ -354,6 +465,34 @@ def log_slash_error(
         action,
         suffix,
         extra={"slash_phase": "ERROR", "message_source": "slash"},
+    )
+
+
+def log_slash_discord_unknown_interaction(command: str, interaction: discord.Interaction) -> None:
+    """Log Discord 10062 as an expected platform quirk (not an Ultron logic failure)."""
+    gl, uid, cid = _slash_ids(interaction)
+    detail = (
+        "[handled_discord] Discord API error 10062 (Unknown interaction): interaction token expired or "
+        "already acknowledged. Common causes: Discord's ~3s acknowledgement window (slow host/network), "
+        "or two bot processes using the same token. Not an Ultron application bug."
+    )
+    logger.info(
+        "source=slash | %s | %s | user_id=%s guild_id=%s channel_id=%s",
+        command,
+        detail,
+        uid,
+        gl,
+        cid,
+        extra={"slash_phase": "HANDLED", "message_source": "slash"},
+    )
+    cmd_log.info(
+        "source=slash | command=%s user_id=%s guild_id=%s channel_id=%s | %s",
+        command,
+        uid,
+        gl,
+        cid,
+        detail,
+        extra={"slash_phase": "HANDLED", "message_source": "slash"},
     )
 
 
@@ -572,6 +711,9 @@ def _format_show_config(app_cfg: AppConfig, env: EnvSettings) -> str:
         f"• **CONFIG_PATH:** `{env.config_path}`",
         f"• **ULTRON_STATE_DIR:** `{env.state_dir}`",
         f"• **redmine host:** {redmine_host}",
+        f"• **{env.environment_bindings.redmine_time_activity_id_env}:** "
+        f"{'set' if os.environ.get(env.environment_bindings.redmine_time_activity_id_env, '').strip() else 'not set'} "
+        f"(optional; disambiguates time-entry activity for **`/log_time`**) ",
         f"• **discord.ephemeral_default:** {app_cfg.discord.ephemeral_default}",
         f"• **discord.issue_metadata_header:** {app_cfg.discord.issue_metadata_header}",
         f"• **discord.new_issues:** status_name={ni.status_name!r} list_limit={ni.list_limit} "
@@ -928,6 +1070,14 @@ class UltronCommandTree(app_commands.CommandTree):
         bot = self.client
         return await _tree_interaction_check(bot.env, interaction)  # type: ignore[attr-defined]
 
+    async def on_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+        if is_unknown_interaction_error(error):
+            cmd = interaction.command
+            name = cmd.name if cmd is not None else "?"
+            log_slash_discord_unknown_interaction(name, interaction)
+            return
+        await super().on_error(interaction, error)
+
 
 def _nl_commands_enabled(app_cfg: AppConfig, env: EnvSettings) -> bool:
     """YAML ``discord.nl_commands`` or env ``ULTRON_NL_COMMANDS``."""
@@ -988,6 +1138,8 @@ class UltronBot(commands.Bot):
         self.llm = llm
         self._jobs_started = False
         self._ready_startup_logged = False
+        #: Set on first ``on_ready`` for `/status` uptime (UTC).
+        self._ready_at_utc: datetime | None = None
         #: UTC timestamps: last successful tick anchor per ``report_schedule`` index (see ``report_schedule_loop``).
         self._report_schedule_last_run: dict[int, datetime] = {}
 
@@ -1264,7 +1416,15 @@ class UltronBot(commands.Bot):
                 await _reply_chunked_to_message(message, _HELP_TEXT, edit_first=status_message)
                 return
             if cmd == "status":
-                await _nl_edit_or_reply(message, status_message, _STATUS_REPLY)
+                st = _format_status_message(
+                    env=self.env,
+                    app_cfg=self.app_cfg,
+                    llm=self.llm,
+                    bot=self,
+                    ready_at_utc=self._ready_at_utc,
+                    guild=message.guild,
+                )
+                await _nl_edit_or_reply(message, status_message, st)
                 return
             if cmd == "list_new_issues":
                 ni = self.app_cfg.discord.new_issues
@@ -1308,6 +1468,25 @@ class UltronBot(commands.Bot):
                     return
                 assert body is not None
                 await _reply_chunked_to_message(message, body, edit_first=status_message)
+                return
+            if cmd == "log_time":
+                issue_id = int(args["issue_id"])
+                hours = float(args["hours"])
+                try:
+                    activities = await self.redmine.list_time_entry_activities()
+                    activity_id = resolve_time_activity_id(
+                        activities,
+                        os.environ.get(self.env.environment_bindings.redmine_time_activity_id_env),
+                    )
+                    await self.redmine.create_time_entry(
+                        issue_id, hours, activity_id=activity_id
+                    )
+                except ValueError as e:
+                    await _err(str(e))
+                    return
+                url = self.redmine.issue_url(issue_id)
+                reply = f"Logged **{hours:g}** h on issue [{issue_id}]({url})."
+                await _reply_chunked_to_message(message, reply, edit_first=status_message)
                 return
             if cmd == "summary":
                 issue_id = int(args["issue_id"])
@@ -2308,12 +2487,8 @@ class UltronBot(commands.Bot):
                     await interaction.response.send_message(_ping_reply)
                     log_action = "send_message in DM"
             except discord.HTTPException as e:
-                # 10062: token already used — common when two bot processes handle the same event (only one may ACK).
-                if getattr(e, "code", None) == 10062:
-                    logger.info(
-                        "ping: unknown interaction (10062) — another process likely responded first; "
-                        "ensure only one Ultron instance is running with this token"
-                    )
+                if is_unknown_interaction_error(e):
+                    log_slash_discord_unknown_interaction("ping", interaction)
                     return
                 log_slash_error(
                     "ping",
@@ -2329,15 +2504,50 @@ class UltronBot(commands.Bot):
                 fields=f"reply={_ping_reply!r}",
             )
 
-        @self.tree.command(name="status", description="Connection check and bot version")
+        @self.tree.command(
+            name="status",
+            description="Bot health summary: version, uptime, Redmine, LLM, and feature flags",
+        )
         async def status_cmd(interaction: discord.Interaction) -> None:
             ephemeral = self.app_cfg.discord.ephemeral_default
             log_slash_input("status", interaction, fields=f"ephemeral={ephemeral}")
-            await interaction.response.send_message(_STATUS_REPLY, ephemeral=ephemeral)
+            # Defer immediately so Discord gets an ack within ~3s (avoids 10062 Unknown interaction
+            # under load, slow I/O, or cold containers); content is sent via followup.
+            try:
+                await interaction.response.defer(ephemeral=ephemeral, thinking=True)
+            except discord.HTTPException as e:
+                if is_unknown_interaction_error(e):
+                    log_slash_discord_unknown_interaction("status", interaction)
+                    return
+                log_slash_error(
+                    "status",
+                    interaction,
+                    action="defer failed",
+                    detail=e,
+                )
+                raise
+            body = _format_status_message(
+                env=self.env,
+                app_cfg=self.app_cfg,
+                llm=self.llm,
+                bot=self,
+                ready_at_utc=self._ready_at_utc,
+                guild=interaction.guild,
+            )
+            try:
+                await interaction.followup.send(body[:_DISCORD_MSG_MAX], ephemeral=ephemeral)
+            except discord.HTTPException as e:
+                log_slash_error(
+                    "status",
+                    interaction,
+                    action="followup send failed",
+                    detail=e,
+                )
+                raise
             log_slash_output(
                 "status",
                 interaction,
-                action="sent connected status with version",
+                action="sent status summary (defer + followup)",
                 fields=f"ephemeral={ephemeral} version={_ULTRON_VERSION!r}",
             )
 
@@ -2453,6 +2663,66 @@ class UltronBot(commands.Bot):
                 ephemeral=ephemeral,
                 cfg=uo,
                 log_command="list_unassigned_issues",
+            )
+
+        @self.tree.command(
+            name="log_time",
+            description="Log spent hours on a Redmine issue (booked as the Redmine API key user).",
+        )
+        @app_commands.describe(
+            issue_id="Redmine issue id",
+            hours="Hours spent (fractional allowed, e.g. 1.5)",
+        )
+        async def log_time_cmd(
+            interaction: discord.Interaction,
+            issue_id: app_commands.Range[int, 1, 2147483647],
+            hours: app_commands.Range[float, 0.01, 999.0],
+        ) -> None:
+            ephemeral = self.app_cfg.discord.ephemeral_default
+            log_slash_input(
+                "log_time",
+                interaction,
+                fields=f"ephemeral={ephemeral} issue_id={issue_id} hours={hours}",
+            )
+            await interaction.response.defer(ephemeral=ephemeral, thinking=True)
+            try:
+                activities = await self.redmine.list_time_entry_activities()
+                activity_id = resolve_time_activity_id(
+                    activities,
+                    os.environ.get(self.env.environment_bindings.redmine_time_activity_id_env),
+                )
+                await self.redmine.create_time_entry(
+                    issue_id, float(hours), activity_id=activity_id
+                )
+            except ValueError as e:
+                await interaction.followup.send(str(e), ephemeral=ephemeral)
+                log_slash_output("log_time", interaction, action="time activity resolution failed")
+                return
+            except IssueNotFound:
+                await interaction.followup.send(
+                    "Issue not found in Redmine.", ephemeral=ephemeral
+                )
+                log_slash_output("log_time", interaction, action="issue not found")
+                return
+            except RedmineError as e:
+                await interaction.followup.send(
+                    "Redmine request failed. Try again later.", ephemeral=ephemeral
+                )
+                log_slash_error(
+                    "log_time",
+                    interaction,
+                    action="redmine request failed",
+                    detail=e,
+                )
+                return
+            url = self.redmine.issue_url(issue_id)
+            msg = f"Logged **{float(hours):g}** h on issue [{issue_id}]({url})."
+            await interaction.followup.send(msg, ephemeral=ephemeral)
+            log_slash_output(
+                "log_time",
+                interaction,
+                action="logged time entry",
+                fields=f"issue_id={issue_id} hours={hours}",
             )
 
         def _dev_placeholder_handler(slot: int):
@@ -2652,6 +2922,7 @@ class UltronBot(commands.Bot):
         first_ready = not self._ready_startup_logged
         if first_ready:
             self._ready_startup_logged = True
+            self._ready_at_utc = datetime.now(timezone.utc)
         on_ready_ex = _STARTUP_LOG_EXTRA if first_ready else {}
         logger.info(
             "Logged in as %s (%s)",

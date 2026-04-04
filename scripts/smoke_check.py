@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
@@ -15,18 +14,20 @@ from dotenv import load_dotenv
 
 def main() -> int:
     load_dotenv(ROOT / ".env")
-    redmine_url = os.environ.get("REDMINE_URL", "").strip().rstrip("/")
-    redmine_key = os.environ.get("REDMINE_API_KEY", "").strip()
-    ollama_base = os.environ.get("OLLAMA_API_BASE", "").strip().rstrip("/")
-    llm_base = os.environ.get("LLM_BASE_URL", "").strip().rstrip("/")
-    if not llm_base and ollama_base:
-        llm_base = ollama_base if ollama_base.endswith("/v1") else f"{ollama_base}/v1"
-    model = os.environ.get("LLM_MODEL", "").strip() or os.environ.get("OLLAMA_MODEL", "").strip()
-    llm_key = os.environ.get("LLM_API_KEY", "").strip() or ("ollama" if ollama_base or ":11434" in llm_base else "")
+    try:
+        from ultron.settings import load_env
+
+        env = load_env()
+    except RuntimeError as e:
+        print(f"FAIL bootstrap: {e}")
+        return 1
+
+    redmine_url = env.redmine_url.rstrip("/")
+    redmine_key = env.redmine_api_key
 
     ok = True
     if not redmine_url or not redmine_key:
-        print("SKIP Redmine: REDMINE_URL / REDMINE_API_KEY missing")
+        print("SKIP Redmine: missing URL or API key (via config environment_bindings)")
         ok = False
     else:
         import httpx
@@ -45,8 +46,15 @@ def main() -> int:
             print(f"FAIL Redmine: {e}")
             ok = False
 
-    if not llm_base or not model or not llm_key:
-        print("SKIP LLM: OLLAMA_* / LLM_* not enough to test")
+    if not env.llm_enabled or not env.llm_base_url.strip():
+        print("SKIP LLM: not configured (same rules as bot load_env)")
+        return 0 if ok else 1
+
+    llm_base = env.llm_base_url.rstrip("/")
+    model = env.llm_model
+    llm_key = env.llm_api_key
+    if not llm_base or not model or not llm_key or model == "(none)":
+        print("SKIP LLM: incomplete LLM settings")
         return 0 if ok else 1
 
     async def llm_ping() -> None:

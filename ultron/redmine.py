@@ -200,6 +200,114 @@ class RedmineClient:
     def issue_url(self, issue_id: int) -> str:
         return f"{self.base_url}/issues/{issue_id}"
 
+    async def list_time_entry_activities(self) -> list[dict[str, Any]]:
+        """Time tracking activities from Redmine (id, name, is_default, active, …)."""
+        async with self._client() as c:
+            r = await c.get("/enumerations/time_entry_activities.json")
+        if r.is_error:
+            raise RedmineError(
+                f"Redmine list time_entry_activities failed: {r.status_code} {r.text[:500]}"
+            )
+        data = r.json()
+        return list(data.get("time_entry_activities", []))
+
+    async def create_time_entry(
+        self,
+        issue_id: int,
+        hours: float,
+        *,
+        activity_id: int,
+        comments: str | None = None,
+    ) -> dict[str, Any]:
+        """POST a new time entry on ``issue_id``. Raises IssueNotFound when Redmine returns 404."""
+        body: dict[str, Any] = {
+            "issue_id": issue_id,
+            "hours": hours,
+            "activity_id": activity_id,
+        }
+        if comments is not None and str(comments).strip():
+            body["comments"] = str(comments).strip()[:255]
+        async with self._client() as c:
+            r = await c.post("/time_entries.json", json={"time_entry": body})
+        if r.status_code == 404:
+            raise IssueNotFound(f"Issue #{issue_id} not found")
+        if r.is_error:
+            raise RedmineError(f"Redmine POST time_entries failed: {r.status_code} {r.text[:500]}")
+        data = r.json()
+        te = data.get("time_entry")
+        return te if isinstance(te, dict) else data
+
+
+def _active_time_entry_activities(activities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Entries Redmine marks as active; if ``active`` is absent, treat as active."""
+    out: list[dict[str, Any]] = []
+    for a in activities:
+        if a.get("active") is False:
+            continue
+        if a.get("id") is None:
+            continue
+        out.append(a)
+    return out
+
+
+def _format_activity_list_for_error(activities: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for a in _active_time_entry_activities(activities):
+        aid = a.get("id")
+        name = str(a.get("name", "") or "").strip() or "(unnamed)"
+        lines.append(f"  • id **{aid}** — {name}")
+    if not lines:
+        return "(no active time entry activities returned by Redmine)"
+    return "\n".join(lines)
+
+
+def resolve_time_activity_id(
+    activities: list[dict[str, Any]],
+    env_override: str | None,
+) -> int:
+    """Pick a time-entry ``activity_id`` for POST /time_entries.json.
+
+    Order: non-empty ``REDMINE_TIME_ACTIVITY_ID`` env (must match an active activity),
+    else single ``is_default`` activity, else sole active activity, else raises
+    ``ValueError`` with a user-visible message listing choices.
+    """
+    active = _active_time_entry_activities(activities)
+    ids_active = {int(a["id"]) for a in active}
+
+    raw_env = (env_override or "").strip()
+    if raw_env:
+        try:
+            want = int(raw_env)
+        except ValueError as e:
+            raise ValueError(
+                f"**REDMINE_TIME_ACTIVITY_ID** must be a numeric id. Available activities:\n"
+                f"{_format_activity_list_for_error(activities)}"
+            ) from e
+        if want not in ids_active:
+            raise ValueError(
+                f"**REDMINE_TIME_ACTIVITY_ID** ({want}) is not an active time entry activity. "
+                f"Set it to one of: {', '.join(str(i) for i in sorted(ids_active))}.\n"
+                f"Available activities:\n{_format_activity_list_for_error(activities)}"
+            )
+        return want
+
+    defaults = [a for a in active if a.get("is_default") is True]
+    if len(defaults) == 1:
+        return int(defaults[0]["id"])
+    if len(defaults) > 1:
+        raise ValueError(
+            "Redmine reports multiple default time activities; set **REDMINE_TIME_ACTIVITY_ID** "
+            f"in `.env` to one of these ids:\n{_format_activity_list_for_error(activities)}"
+        )
+
+    if len(active) == 1:
+        return int(active[0]["id"])
+
+    raise ValueError(
+        "Cannot pick a time entry activity automatically. Set **REDMINE_TIME_ACTIVITY_ID** "
+        f"in `.env` to one of these ids:\n{_format_activity_list_for_error(activities)}"
+    )
+
 
 def status_matches_closed_prefix(status_name: str, prefixes: tuple[str, ...]) -> bool:
     """True if ``status_name`` equals or starts with any non-empty prefix (case-insensitive, stripped)."""

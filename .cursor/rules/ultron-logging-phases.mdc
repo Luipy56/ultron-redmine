@@ -23,6 +23,7 @@ Defined in **`_PhaseColoredMixin._PHASE_COLORS`** in `ultron/__main__.py`:
 | `INPUT` | Work started: command received (slash) or mention accepted for processing (chat). |
 | `OUTPUT` | User-visible success: reply sent, message edited, delivery complete. |
 | `ERROR` | Failure worth `warning` (often with `detail=`). |
+| `HANDLED` | Expected Discord platform quirk (e.g. interaction 10062) logged at INFO, not an app bug. |
 | `DENIED` | Gate rejected (e.g. not whitelisted, admin command in NL path). |
 | `RECEIVED` | Raw @mention / reply seen before whitelist routing. |
 | `IGNORE` | Mention not acted on (e.g. not whitelisted). |

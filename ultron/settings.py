@@ -4,15 +4,19 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-# Default HTTP read timeout for LLM calls (15 min). Override with LLM_TIMEOUT_SECONDS.
+from ultron.config import EnvironmentBindings, load_config
+
+# Default HTTP read timeout for LLM calls (15 min). Override via binding ``llm_timeout_seconds_env``.
 _DEFAULT_LLM_TIMEOUT_SECONDS = 900.0
 
-# When ``DISCORD_GUILD_ID`` is unset or empty, slash commands sync to this guild (immediate updates).
-# Set ``DISCORD_GUILD_ID=0`` or ``global`` to use Discord global command sync instead (~1 h propagation).
+# When guild binding is unset or empty, slash commands sync to this guild (immediate updates).
 _DEFAULT_DISCORD_GUILD_SLASH_SYNC_ID = 788074756044750891
 
 # Placeholder when config.yaml defines llm_chain (real keys come from api_key_env entries).
 _LLM_CHAIN_PLACEHOLDER_KEY = "__llm_chain__"
+
+# Bootstrap: only this name is read without going through config.yaml.
+_CONFIG_PATH_ENV = "CONFIG_PATH"
 
 
 def _config_file_has_llm_chain(config_path: str) -> bool:
@@ -21,8 +25,6 @@ def _config_file_has_llm_chain(config_path: str) -> bool:
     if not p.is_file():
         return False
     try:
-        from ultron.config import load_config
-
         return load_config(p).llm_chain is not None
     except Exception:
         return False
@@ -48,20 +50,26 @@ class EnvSettings:
     discord_admin_ids: frozenset[int]
     #: When True, request privileged Message Content + guild/DM message intents (must match Developer Portal).
     discord_message_content_intent: bool
-    #: When True, ``ULTRON_NL_COMMANDS`` enables natural-language routing for @mention (merged with YAML ``discord.nl_commands``).
+    #: When True, env override enables natural-language routing for @mention (merged with YAML ``discord.nl_commands``).
     ultron_nl_commands: bool
+    #: Which environment variable names were read (from ``config.yaml`` ``environment_bindings``).
+    environment_bindings: EnvironmentBindings
 
 
-def _opt_int(name: str) -> int | None:
-    v = os.environ.get(name, "").strip()
+def _get_env(var_name: str) -> str:
+    return os.environ.get(var_name, "").strip()
+
+
+def _opt_int(var_name: str) -> int | None:
+    v = _get_env(var_name)
     if not v:
         return None
     return int(v)
 
 
-def _discord_guild_id_for_slash_sync() -> int | None:
-    """``DISCORD_GUILD_ID``: unset → team default guild; ``0`` / ``global`` → None (global sync)."""
-    raw = os.environ.get("DISCORD_GUILD_ID", "").strip().lower()
+def _discord_guild_id_for_slash_sync(var_name: str) -> int | None:
+    """Unset → team default guild; ``0`` / ``global`` → None (global sync)."""
+    raw = _get_env(var_name).lower()
     if not raw:
         return _DEFAULT_DISCORD_GUILD_SLASH_SYNC_ID
     if raw in ("0", "global"):
@@ -69,21 +77,20 @@ def _discord_guild_id_for_slash_sync() -> int | None:
     return int(raw)
 
 
-def _opt_float(name: str) -> float | None:
-    v = os.environ.get(name, "").strip()
+def _opt_float(var_name: str) -> float | None:
+    v = _get_env(var_name)
     if not v:
         return None
     return float(v)
 
 
-def _env_flag_enabled(name: str) -> bool:
-    """True when ``VAR`` is set to 1 / true / yes (case-insensitive)."""
-    v = os.environ.get(name, "").strip().lower()
+def _env_flag_enabled(var_name: str) -> bool:
+    v = _get_env(var_name).lower()
     return v in ("1", "true", "yes", "on")
 
 
-def _parse_discord_admin_ids() -> frozenset[int]:
-    raw = os.environ.get("DISCORD_ADMIN_IDS", "").strip()
+def _parse_discord_admin_ids(var_name: str) -> frozenset[int]:
+    raw = _get_env(var_name)
     if not raw:
         return frozenset()
     out: list[int] = []
@@ -111,36 +118,53 @@ def _ollama_openai_base(api_base: str) -> str:
 
 
 def load_env() -> EnvSettings:
-    token = os.environ.get("DISCORD_TOKEN", "").strip()
-    if not token:
-        raise RuntimeError("DISCORD_TOKEN is required")
-
-    redmine_url = os.environ.get("REDMINE_URL", "").strip().rstrip("/")
-    if not redmine_url:
-        raise RuntimeError("REDMINE_URL is required")
-
-    redmine_key = os.environ.get("REDMINE_API_KEY", "").strip()
-    if not redmine_key:
-        raise RuntimeError("REDMINE_API_KEY is required")
-
-    config_path = os.environ.get("CONFIG_PATH", "config.yaml").strip() or "config.yaml"
-
-    llm_disabled_flag = _env_flag_enabled("LLM_DISABLED") or _env_flag_enabled("ULTRON_NO_LLM")
-    has_chain = _config_file_has_llm_chain(config_path)
-    if llm_disabled_flag and has_chain:
+    config_path = os.environ.get(_CONFIG_PATH_ENV, "config.yaml").strip() or "config.yaml"
+    cfg_file = Path(config_path)
+    if not cfg_file.is_file():
         raise RuntimeError(
-            "LLM_DISABLED or ULTRON_NO_LLM is set but config.yaml defines llm_chain. "
-            "Remove or disable llm_chain entries, or unset LLM_DISABLED / ULTRON_NO_LLM."
+            f"Config file not found: {cfg_file.resolve()}. Set {_CONFIG_PATH_ENV!r} or create config.yaml."
+        )
+    try:
+        app_cfg = load_config(cfg_file)
+    except ValueError as e:
+        raise RuntimeError(f"Invalid config: {e}") from e
+
+    b = app_cfg.environment_bindings
+
+    token = _get_env(b.discord_token_env)
+    if not token:
+        raise RuntimeError(
+            f"Discord token is required (environment variable {b.discord_token_env!r} from config environment_bindings)."
         )
 
-    ollama_api_base = os.environ.get("OLLAMA_API_BASE", "").strip()
-    llm_base = os.environ.get("LLM_BASE_URL", "").strip().rstrip("/")
+    redmine_url = _get_env(b.redmine_url_env).rstrip("/")
+    if not redmine_url:
+        raise RuntimeError(
+            f"Redmine URL is required (environment variable {b.redmine_url_env!r} from config environment_bindings)."
+        )
+
+    redmine_key = _get_env(b.redmine_api_key_env)
+    if not redmine_key:
+        raise RuntimeError(
+            f"Redmine API key is required (environment variable {b.redmine_api_key_env!r} from config environment_bindings)."
+        )
+
+    has_chain = app_cfg.llm_chain is not None
+    llm_disabled_flag = _env_flag_enabled(b.llm_disabled_env) or _env_flag_enabled(b.ultron_no_llm_env)
+    if llm_disabled_flag and has_chain:
+        raise RuntimeError(
+            f"{b.llm_disabled_env} or {b.ultron_no_llm_env} is set but config.yaml defines llm_chain. "
+            "Remove or disable llm_chain entries, or unset those variables."
+        )
+
+    ollama_api_base = _get_env(b.ollama_api_base_env)
+    llm_base = _get_env(b.llm_base_url_env).rstrip("/")
     if not llm_base and ollama_api_base:
         llm_base = _ollama_openai_base(ollama_api_base)
     if not llm_base:
         llm_base = "https://api.openai.com/v1"
 
-    llm_key = os.environ.get("LLM_API_KEY", "").strip()
+    llm_key = _get_env(b.llm_api_key_env)
     if not llm_key and ollama_api_base:
         llm_key = "ollama"
     if not llm_key and ":11434" in llm_base:
@@ -164,37 +188,36 @@ def load_env() -> EnvSettings:
     else:
         if not llm_key:
             raise RuntimeError(
-                "LLM_API_KEY is required (or set OLLAMA_API_BASE for local Ollama, "
-                "or define a non-empty llm_chain in config.yaml)"
+                f"LLM API key is required (environment variable {b.llm_api_key_env!r}, or Ollama base via "
+                f"{b.ollama_api_base_env!r} / :11434 in base URL, or define llm_chain in config.yaml)."
             )
-        llm_model = os.environ.get("LLM_MODEL", "").strip()
+        llm_model = _get_env(b.llm_model_env)
         if not llm_model:
-            llm_model = os.environ.get("OLLAMA_MODEL", "").strip()
+            llm_model = _get_env(b.ollama_model_env)
         if not llm_model:
             llm_model = "gpt-4o-mini"
 
-    state_dir_raw = os.environ.get("ULTRON_STATE_DIR", "data").strip() or "data"
+    state_dir_raw = _get_env(b.ultron_state_dir_env) or "data"
     state_dir = Path(state_dir_raw).expanduser().resolve()
 
-    bot_owner_contact = os.environ.get("BOT_OWNER_CONTACT", "").strip() or None
+    bot_raw = _get_env(b.bot_owner_contact_env)
+    bot_owner_contact = bot_raw or None
 
-    ollama_raw = os.environ.get("OLLAMA_API_BASE", "")
+    ollama_raw = _get_env(b.ollama_api_base_env)
     local_ollama = _is_local_ollama(llm_base, ollama_raw) if llm_enabled else False
-    timeout_override = _opt_float("LLM_TIMEOUT_SECONDS")
+    timeout_override = _opt_float(b.llm_timeout_seconds_env)
     llm_timeout = (
         timeout_override if timeout_override is not None else _DEFAULT_LLM_TIMEOUT_SECONDS
     )
-    retries_override = _opt_int("LLM_MAX_RETRIES")
+    retries_override = _opt_int(b.llm_max_retries_env)
     llm_max_retries = (
-        retries_override
-        if retries_override is not None
-        else (0 if local_ollama else 2)
+        retries_override if retries_override is not None else (0 if local_ollama else 2)
     )
 
     return EnvSettings(
         discord_token=token,
-        discord_guild_id=_discord_guild_id_for_slash_sync(),
-        discord_application_id=_opt_int("DISCORD_APPLICATION_ID"),
+        discord_guild_id=_discord_guild_id_for_slash_sync(b.discord_guild_id_env),
+        discord_application_id=_opt_int(b.discord_application_id_env),
         redmine_url=redmine_url,
         redmine_api_key=redmine_key,
         llm_enabled=llm_enabled,
@@ -206,7 +229,8 @@ def load_env() -> EnvSettings:
         config_path=config_path,
         state_dir=state_dir,
         bot_owner_contact=bot_owner_contact,
-        discord_admin_ids=_parse_discord_admin_ids(),
-        discord_message_content_intent=_env_flag_enabled("DISCORD_MESSAGE_CONTENT_INTENT"),
-        ultron_nl_commands=_env_flag_enabled("ULTRON_NL_COMMANDS"),
+        discord_admin_ids=_parse_discord_admin_ids(b.discord_admin_ids_env),
+        discord_message_content_intent=_env_flag_enabled(b.discord_message_content_intent_env),
+        ultron_nl_commands=_env_flag_enabled(b.ultron_nl_commands_env),
+        environment_bindings=b,
     )

@@ -1,6 +1,11 @@
 # Ultron — example configuration (safe to commit). Copy to config.yaml and adjust.
 # Empty strings and null use built-in defaults at runtime (see ultron/config.py).
 
+# environment_bindings — Optional. Declares which **process environment variable names** supply Discord, Redmine, and LLM settings (defaults match `.env.example`). Put secret **values** in `.env` or your host environment — never commit them in this file. Each key overrides the default name for that role; omit the whole block to use built-in names (see `EnvironmentBindings` in `ultron/config.py`).
+# Example: store the Redmine key under a custom name in `.env`:
+# environment_bindings:
+#   redmine_api_key_env: MY_REDMINE_KEY
+
 # timezone — IANA name for report headers and date formatting; empty string loads as UTC.
 # Example: Europe/Madrid
 timezone: ""

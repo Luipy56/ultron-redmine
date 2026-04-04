@@ -34,6 +34,7 @@ class _PhaseColoredMixin:
         "INPUT": "bold_cyan",
         "OUTPUT": "bold_green",
         "ERROR": "bold_red",
+        "HANDLED": "bold_cyan",
         "DENIED": "bold_purple",
         # Chat / @mention (extra chat_phase=…)
         "RECEIVED": "bold_blue",

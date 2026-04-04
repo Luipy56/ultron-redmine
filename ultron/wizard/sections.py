@@ -67,14 +67,31 @@ def section_paths(q: Any, state: WizardState) -> None:
 
 def section_redmine(q: Any, state: WizardState) -> None:
     print("\n--- Redmine ---\n")
+    print(
+        "If `config.yaml` defines `environment_bindings`, use the same variable names in `.env` "
+        "as in that block (defaults match REDMINE_* here).\n"
+    )
     url = state.env_get("REDMINE_URL")
     key = state.env_get("REDMINE_API_KEY")
     print(f"REDMINE_URL: {url or '(empty)'}")
-    print(f"REDMINE_API_KEY: {mask_secret('REDMINE_API_KEY', key)}\n")
+    print(f"REDMINE_API_KEY: {mask_secret('REDMINE_API_KEY', key)}")
+    ta = state.env_get("REDMINE_TIME_ACTIVITY_ID")
+    print(
+        f"REDMINE_TIME_ACTIVITY_ID: {ta or '(empty; optional — set when /log_time needs a fixed activity id)'}\n"
+    )
     if _yn(q, "Edit Redmine URL?", default=not bool(url)):
         state.env_set("REDMINE_URL", _text(q, "REDMINE_URL (no trailing slash)", default=url).strip().rstrip("/"))
     if _yn(q, "Edit Redmine API key?", default=not bool(key)):
         state.env_set("REDMINE_API_KEY", _text(q, "REDMINE_API_KEY", default="").strip())
+    if _yn(q, "Edit REDMINE_TIME_ACTIVITY_ID (optional, for /log_time)?", default=False):
+        state.env_set(
+            "REDMINE_TIME_ACTIVITY_ID",
+            _text(
+                q,
+                "REDMINE_TIME_ACTIVITY_ID (numeric id or empty)",
+                default=state.env_get("REDMINE_TIME_ACTIVITY_ID") or "",
+            ).strip(),
+        )
     if _yn(q, "Test connection to Redmine now?", default=bool(state.env_get("REDMINE_URL") and state.env_get("REDMINE_API_KEY"))):
         from ultron.redmine import RedmineClient, RedmineError
         import httpx

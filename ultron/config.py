@@ -100,6 +100,83 @@ class LoggingConfig:
 
 
 @dataclass(frozen=True)
+class EnvironmentBindings:
+    """Names of process environment variables that supply runtime values (set in `.env`, systemd, etc.)."""
+
+    discord_token_env: str = "DISCORD_TOKEN"
+    redmine_url_env: str = "REDMINE_URL"
+    redmine_api_key_env: str = "REDMINE_API_KEY"
+    redmine_time_activity_id_env: str = "REDMINE_TIME_ACTIVITY_ID"
+    llm_api_key_env: str = "LLM_API_KEY"
+    llm_base_url_env: str = "LLM_BASE_URL"
+    llm_model_env: str = "LLM_MODEL"
+    ollama_api_base_env: str = "OLLAMA_API_BASE"
+    ollama_model_env: str = "OLLAMA_MODEL"
+    llm_timeout_seconds_env: str = "LLM_TIMEOUT_SECONDS"
+    llm_max_retries_env: str = "LLM_MAX_RETRIES"
+    llm_disabled_env: str = "LLM_DISABLED"
+    ultron_no_llm_env: str = "ULTRON_NO_LLM"
+    discord_guild_id_env: str = "DISCORD_GUILD_ID"
+    discord_application_id_env: str = "DISCORD_APPLICATION_ID"
+    discord_admin_ids_env: str = "DISCORD_ADMIN_IDS"
+    discord_message_content_intent_env: str = "DISCORD_MESSAGE_CONTENT_INTENT"
+    ultron_nl_commands_env: str = "ULTRON_NL_COMMANDS"
+    ultron_state_dir_env: str = "ULTRON_STATE_DIR"
+    bot_owner_contact_env: str = "BOT_OWNER_CONTACT"
+
+
+def _parse_environment_bindings(raw: Any) -> EnvironmentBindings:
+    if raw is None:
+        return EnvironmentBindings()
+    if not isinstance(raw, dict):
+        raise ValueError("environment_bindings must be a mapping")
+    defaults = EnvironmentBindings()
+
+    def name(field: str, default: str) -> str:
+        if field not in raw:
+            return default
+        v = raw[field]
+        if v is None:
+            return default
+        s = str(v).strip()
+        if not s:
+            raise ValueError(f"environment_bindings.{field} cannot be empty (omit the key for the default name)")
+        return s
+
+    b = EnvironmentBindings(
+        discord_token_env=name("discord_token_env", defaults.discord_token_env),
+        redmine_url_env=name("redmine_url_env", defaults.redmine_url_env),
+        redmine_api_key_env=name("redmine_api_key_env", defaults.redmine_api_key_env),
+        redmine_time_activity_id_env=name(
+            "redmine_time_activity_id_env", defaults.redmine_time_activity_id_env
+        ),
+        llm_api_key_env=name("llm_api_key_env", defaults.llm_api_key_env),
+        llm_base_url_env=name("llm_base_url_env", defaults.llm_base_url_env),
+        llm_model_env=name("llm_model_env", defaults.llm_model_env),
+        ollama_api_base_env=name("ollama_api_base_env", defaults.ollama_api_base_env),
+        ollama_model_env=name("ollama_model_env", defaults.ollama_model_env),
+        llm_timeout_seconds_env=name(
+            "llm_timeout_seconds_env", defaults.llm_timeout_seconds_env
+        ),
+        llm_max_retries_env=name("llm_max_retries_env", defaults.llm_max_retries_env),
+        llm_disabled_env=name("llm_disabled_env", defaults.llm_disabled_env),
+        ultron_no_llm_env=name("ultron_no_llm_env", defaults.ultron_no_llm_env),
+        discord_guild_id_env=name("discord_guild_id_env", defaults.discord_guild_id_env),
+        discord_application_id_env=name(
+            "discord_application_id_env", defaults.discord_application_id_env
+        ),
+        discord_admin_ids_env=name("discord_admin_ids_env", defaults.discord_admin_ids_env),
+        discord_message_content_intent_env=name(
+            "discord_message_content_intent_env", defaults.discord_message_content_intent_env
+        ),
+        ultron_nl_commands_env=name("ultron_nl_commands_env", defaults.ultron_nl_commands_env),
+        ultron_state_dir_env=name("ultron_state_dir_env", defaults.ultron_state_dir_env),
+        bot_owner_contact_env=name("bot_owner_contact_env", defaults.bot_owner_contact_env),
+    )
+    return b
+
+
+@dataclass(frozen=True)
 class LLMProviderSpec:
     """One YAML `llm_chain` list item (order = priority). Keys come from `api_key_env`."""
 
@@ -140,6 +217,7 @@ class AppConfig:
     reports: ReportsConfig
     report_schedule: tuple[ReportScheduleEntry, ...]
     logging: LoggingConfig
+    environment_bindings: EnvironmentBindings = field(default_factory=EnvironmentBindings)
     llm_chain: tuple[LLMProviderSpec, ...] | None = None
 
 
@@ -438,6 +516,7 @@ def load_config(path: Path) -> AppConfig:
     logging_cfg = LoggingConfig(log_read_messages=_bool(l_raw.get("log_read_messages"), False))
 
     llm_chain = _parse_llm_chain(raw.get("llm_chain"))
+    environment_bindings = _parse_environment_bindings(raw.get("environment_bindings"))
 
     return AppConfig(
         timezone=tz,
@@ -445,5 +524,6 @@ def load_config(path: Path) -> AppConfig:
         reports=reports_cfg,
         report_schedule=report_schedule,
         logging=logging_cfg,
+        environment_bindings=environment_bindings,
         llm_chain=llm_chain,
     )
