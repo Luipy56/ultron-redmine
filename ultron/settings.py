@@ -117,7 +117,7 @@ def _ollama_openai_base(api_base: str) -> str:
     return b if b.endswith("/v1") else f"{b}/v1"
 
 
-def load_env() -> EnvSettings:
+def load_env(*, require_discord: bool = True, require_redmine: bool = True) -> EnvSettings:
     config_path = os.environ.get(_CONFIG_PATH_ENV, "config.yaml").strip() or "config.yaml"
     cfg_file = Path(config_path)
     if not cfg_file.is_file():
@@ -132,19 +132,19 @@ def load_env() -> EnvSettings:
     b = app_cfg.environment_bindings
 
     token = _get_env(b.discord_token_env)
-    if not token:
+    if require_discord and not token:
         raise RuntimeError(
             f"Discord token is required (environment variable {b.discord_token_env!r} from config environment_bindings)."
         )
 
     redmine_url = _get_env(b.redmine_url_env).rstrip("/")
-    if not redmine_url:
+    if require_redmine and not redmine_url:
         raise RuntimeError(
             f"Redmine URL is required (environment variable {b.redmine_url_env!r} from config environment_bindings)."
         )
 
     redmine_key = _get_env(b.redmine_api_key_env)
-    if not redmine_key:
+    if require_redmine and not redmine_key:
         raise RuntimeError(
             f"Redmine API key is required (environment variable {b.redmine_api_key_env!r} from config environment_bindings)."
         )

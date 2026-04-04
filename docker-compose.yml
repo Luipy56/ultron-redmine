@@ -1,5 +1,8 @@
 services:
   ultron:
+    # One bot container per host with this name; avoids a second `docker compose up` from
+    # silently running another copy with the same token (change the name if you need two stacks).
+    container_name: ultron-redmine-bot
     build: .
     working_dir: /app
     env_file:

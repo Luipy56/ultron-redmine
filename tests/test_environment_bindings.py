@@ -58,3 +58,22 @@ def test_parse_environment_bindings_rejects_empty_name(tmp_path: Path) -> None:
 def test_environment_bindings_frozen_defaults() -> None:
     b = EnvironmentBindings()
     assert b.llm_api_key_env == "LLM_API_KEY"
+
+
+def test_load_config_redmine_user_aliases(tmp_path: Path) -> None:
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "timezone: UTC\n"
+        "redmine:\n"
+        "  user_id_by_login:\n"
+        "    JDoe: 99\n"
+        "  time_summary_max_entries: 500\n"
+        "discord: {}\n"
+        "reports: {}\n"
+        "report_schedule: []\n"
+        "logging: {}\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(p)
+    assert cfg.redmine.user_id_by_login["jdoe"] == 99
+    assert cfg.redmine.time_summary_max_entries == 500

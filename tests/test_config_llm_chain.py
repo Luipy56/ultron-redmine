@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from ultron.config import llm_chain_slash_flags, load_config
 from ultron.settings import _config_file_has_llm_chain
 
@@ -63,7 +65,8 @@ def test_llm_chain_all_disabled_is_none(tmp_path: Path) -> None:
     body = _MINIMAL_TOP + "llm_chain:\n" + _entry("false")
     p = tmp_path / "cfg.yaml"
     p.write_text(body, encoding="utf-8")
-    cfg = load_config(p)
+    with pytest.warns(UserWarning, match="llm_chain"):
+        cfg = load_config(p)
     assert cfg.llm_chain is None
 
 
@@ -71,7 +74,8 @@ def test_config_file_has_llm_chain_false_when_all_disabled(tmp_path: Path) -> No
     body = _MINIMAL_TOP + "llm_chain:\n" + _entry("false")
     p = tmp_path / "cfg.yaml"
     p.write_text(body, encoding="utf-8")
-    assert _config_file_has_llm_chain(str(p)) is False
+    with pytest.warns(UserWarning, match="llm_chain"):
+        assert _config_file_has_llm_chain(str(p)) is False
 
 
 def test_config_file_has_llm_chain_true_when_enabled_present(tmp_path: Path) -> None:

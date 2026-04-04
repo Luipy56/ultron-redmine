@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,8 @@ _DEFAULT_LLM_CHAIN_SKIP_STATUS = (
 )
 _DEFAULT_LLM_CHAIN_ALL_FAILED = (
     "All configured language model providers failed (URLs, keys, quotas, or network). "
-    "Check **config.yaml** `llm_chain` and the bot logs."
+    "Check **config.yaml** `llm_chain` and the bot logs. "
+    "For a single provider from `.env` only, use an empty `llm_chain: []` and fix **LLM_*** / **OLLAMA_***."
 )
 
 # Defaults for llm_chain entries (aligned with EnvSettings cloud defaults).
@@ -97,6 +99,16 @@ class ReportScheduleEntry:
 @dataclass
 class LoggingConfig:
     log_read_messages: bool = False
+
+
+@dataclass
+class RedmineConfig:
+    """Optional Redmine-related YAML (not secrets)."""
+
+    #: Map Redmine login (case-insensitive) → numeric user id for `/time_summary` when `/users.json` is not allowed.
+    user_id_by_login: dict[str, int] = field(default_factory=dict)
+    #: Max time entries fetched for `/time_summary` (paginated, capped).
+    time_summary_max_entries: int = 2000
 
 
 @dataclass(frozen=True)
@@ -217,6 +229,7 @@ class AppConfig:
     reports: ReportsConfig
     report_schedule: tuple[ReportScheduleEntry, ...]
     logging: LoggingConfig
+    redmine: RedmineConfig = field(default_factory=RedmineConfig)
     environment_bindings: EnvironmentBindings = field(default_factory=EnvironmentBindings)
     llm_chain: tuple[LLMProviderSpec, ...] | None = None
 
@@ -515,8 +528,32 @@ def load_config(path: Path) -> AppConfig:
     l_raw = raw.get("logging") or {}
     logging_cfg = LoggingConfig(log_read_messages=_bool(l_raw.get("log_read_messages"), False))
 
-    llm_chain = _parse_llm_chain(raw.get("llm_chain"))
+    raw_llm_chain = raw.get("llm_chain")
+    llm_chain = _parse_llm_chain(raw_llm_chain)
+    if isinstance(raw_llm_chain, list) and len(raw_llm_chain) > 0 and llm_chain is None:
+        warnings.warn(
+            "config.yaml: `llm_chain` lists one or more entries but none are enabled (all `enabled: false`), "
+            "so no YAML chain is active. Ultron falls back to a single LLM from LLM_* environment variables "
+            "if those are set. If you expected a chain, enable an entry. If you see duplicate top-level "
+            "`llm_chain` keys, YAML uses the last one only (e.g. a trailing `llm_chain: []` removes the chain).",
+            UserWarning,
+            stacklevel=2,
+        )
     environment_bindings = _parse_environment_bindings(raw.get("environment_bindings"))
+
+    rm_raw = raw.get("redmine") or {}
+    uid_map: dict[str, int] = {}
+    ubl = rm_raw.get("user_id_by_login")
+    if ubl is not None:
+        if not isinstance(ubl, dict):
+            raise ValueError("redmine.user_id_by_login must be a mapping of login string to integer user id")
+        for k, v in ubl.items():
+            lk = str(k).strip().casefold()
+            if not lk:
+                continue
+            uid_map[lk] = int(v)
+    tsm = max(50, min(5000, _int(rm_raw.get("time_summary_max_entries"), 2000)))
+    redmine_cfg = RedmineConfig(user_id_by_login=uid_map, time_summary_max_entries=tsm)
 
     return AppConfig(
         timezone=tz,
@@ -524,6 +561,7 @@ def load_config(path: Path) -> AppConfig:
         reports=reports_cfg,
         report_schedule=report_schedule,
         logging=logging_cfg,
+        redmine=redmine_cfg,
         environment_bindings=environment_bindings,
         llm_chain=llm_chain,
     )

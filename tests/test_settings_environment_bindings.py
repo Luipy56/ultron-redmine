@@ -41,3 +41,30 @@ def test_load_env_fails_when_config_file_missing(monkeypatch: pytest.MonkeyPatch
 
     with pytest.raises(RuntimeError, match="Config file not found"):
         load_env()
+
+
+def test_load_env_without_discord_when_not_required(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(
+        """\
+timezone: UTC
+discord: {}
+reports: {}
+report_schedule: []
+logging: {}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_PATH", str(cfg))
+    monkeypatch.delenv("DISCORD_TOKEN", raising=False)
+    monkeypatch.setenv("REDMINE_URL", "https://rm.example")
+    monkeypatch.setenv("REDMINE_API_KEY", "key")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+
+    from ultron.settings import load_env
+
+    env = load_env(require_discord=False)
+    assert env.discord_token == ""
+    assert env.redmine_url == "https://rm.example"

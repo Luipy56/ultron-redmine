@@ -108,8 +108,9 @@ During the wizard: **Y** / **N** / **r** (see the hint next to each prompt; **r*
 | `/rpsls` | Allowlisted — rock–paper–scissors–lizard–Spock vs the bot (visibility follows `discord.ephemeral_default`) |
 | `/list_new_issues` | Allowlisted — lists issues in the configured Redmine “new” status, created at least **M** days ago (`discord.new_issues` in `config.yaml`) |
 | `/issues_by_status` | Allowlisted — same listing rules as `/list_new_issues`, but you pass the Redmine **status** name as the option (min age & list cap still from `discord.new_issues`) |
-| `/list_unassigned_issues` | Allowlisted — **unassigned** issues still **open** in Redmine, created at least **N** day(s) ago, excluding status names that match configured **closed-equivalent prefixes** (`discord.unassigned_open` in `config.yaml`) |
-| `/log_time` | Allowlisted — logs **spent hours** on a Redmine issue via the REST API (as the **Redmine API key** user). Optional **`REDMINE_TIME_ACTIVITY_ID`** in `.env` when your instance has several time-entry activities |
+| `/list_unassigned_issues` | Allowlisted — **unassigned** issues still **open** in Redmine, created at least **N** day(s) ago, excluding status names that match configured **closed-equivalent prefixes** (`discord.unassigned_open` in `config.yaml`); first chunk as an embed |
+| `/time_summary` `user` | Allowlisted — Redmine **spent hours** for a user (**today**, **this week** Mon–today, **last 7 days** by `spent_on`, **last 24 h** by `created_on`). `user` = Redmine login, numeric id, or **`me`**. Optional **`redmine.user_id_by_login`** in `config.yaml` if login API lookup is denied |
+| `/log_time` | Allowlisted — logs **spent hours** on an issue (as the **Redmine API key** user); optional **comments** and **spent_on** (YYYY-MM-DD). Optional **`REDMINE_TIME_ACTIVITY_ID`** in `.env` when your instance has several time-entry activities |
 | `/summary`, `/ask_issue`, `/note` | Allowlisted — require a **configured LLM** |
 | `@Ultron` (mention or reply) | Allowlisted — LLM router when NL routing is enabled and an LLM is configured; otherwise a short notice. **Message Content Intent** may be required in some setups. |
 | `/token` (DM) | Request an onboarding code |
@@ -127,7 +128,7 @@ The bot reads **`.env`** from the current working directory (usually the repo ro
 
 **Optional:** LLM-related vars (only if you use a model), `REDMINE_TIME_ACTIVITY_ID` (for **`/log_time`** when Redmine has multiple time activities), `CONFIG_PATH`, `ULTRON_STATE_DIR`, `DISCORD_ADMIN_IDS`, guild sync (`DISCORD_GUILD_ID`), intents, logging, etc. If you use a non-empty **`llm_chain`** in `config.yaml`, API keys normally come from the env var names listed in each chain entry (`api_key_env`), not from `LLM_API_KEY`.
 
-YAML settings (Discord copy, `report_schedule`, `llm_chain`, …) are **not** in `.env`; use **`config.yaml`** and **[`config.example.yaml`](config.example.yaml)**.
+YAML settings (Discord copy, `report_schedule`, `llm_chain`, optional **`redmine.user_id_by_login`**, …) are **not** in `.env`; use **`config.yaml`** and **[`config.example.yaml`](config.example.yaml)**.
 
 **Environment variable names:** Optional top-level **`environment_bindings`** in `config.yaml` defines which env var **names** the bot reads for each role (Discord token, Redmine URL/key, `LLM_*`, etc.). Default names match [`.env.example`](.env.example). Secret **values** still come from the process environment (`.env`, Docker, systemd); the YAML only remaps names. `llm_chain[].api_key_env` continues to name the key variable per provider.
 
@@ -170,8 +171,9 @@ Copy **[`config.example.yaml`](config.example.yaml)** → `config.yaml`. **Every
 - **`/note issue_id text`** — Confirms the ticket exists, asks the LLM to polish the text, then appends it as a Redmine journal note. **Requires a whitelisted user id** and a **configured model**. Same optional LLM options as **`/summary`**.
 - **`/list_new_issues`** — Lists Redmine issues whose status matches **`discord.new_issues.status_name`**, created at least **`discord.new_issues.min_age_days`** ago (see `config.yaml`). **Requires a whitelisted user id.**
 - **`/issues_by_status` `status`** — Same output rules as **`/list_new_issues`**, but **`status`** is the Redmine issue status name for this run (min age and list limit still come from **`discord.new_issues`**). **Requires a whitelisted user id.**
-- **`/list_unassigned_issues`** — Lists **unassigned** Redmine issues that are still **open** (`status_id=open`), created at least **`discord.unassigned_open.min_age_days`** ago (default **1**), excluding any current status whose name **equals or starts with** a string in **`discord.unassigned_open.closed_status_prefixes`** (case-insensitive; e.g. `Solved` matches `Solved STAGE`). List length is capped by **`discord.unassigned_open.list_limit`**. **Requires a whitelisted user id.**
-- **`/log_time` `issue_id` `hours`** — Creates a Redmine **time entry** on the issue (fractional hours allowed). Booked as the **Redmine user** behind **`REDMINE_API_KEY`**, not the Discord display name. If Redmine exposes several **time entry activities** and none is an unambiguous default, set **`REDMINE_TIME_ACTIVITY_ID`** in `.env` to the numeric activity id (see [`.env.example`](.env.example)). **Requires a whitelisted user id**; **no LLM** required.
+- **`/list_unassigned_issues`** — Lists **unassigned** Redmine issues that are still **open** (`status_id=open`), created at least **`discord.unassigned_open.min_age_days`** ago (default **1**), excluding any current status whose name **equals or starts with** a string in **`discord.unassigned_open.closed_status_prefixes`** (case-insensitive; e.g. `Solved` matches `Solved STAGE`). List length is capped by **`discord.unassigned_open.list_limit`**. **Requires a whitelisted user id.** The first chunk is sent as an **embed**; the rest as plain messages.
+- **`/time_summary` `user`** — Totals **hours** from Redmine **time entries** for the given Redmine user: **today** and **this week** (Monday through today, **`timezone`** in `config.yaml`), **last 7 days** (inclusive, by **`spent_on`**), and **last 24 hours** (by each entry’s **`created_on`**, UTC). Pass Redmine **login**, a numeric **user id**, or **`me`** for the API user. If your Redmine role cannot **list users** (403), configure **`redmine.user_id_by_login`** (login → id). Fetches up to **`redmine.time_summary_max_entries`** rows over a rolling **`spent_on`** window (see [config.example.yaml](config.example.yaml)). **Requires a whitelisted user id**; **no LLM** required.
+- **`/log_time` `issue_id` `hours`** [`comments`] [`spent_on`] — Creates a Redmine **time entry** (fractional hours). Optional **`comments`** (short text) and **`spent_on`** (**YYYY-MM-DD**). Booked as the **Redmine user** behind **`REDMINE_API_KEY`**. Clearer errors on **403/422** when Redmine returns JSON errors. If Redmine exposes several **time entry activities**, set **`REDMINE_TIME_ACTIVITY_ID`** in `.env` when needed (see [`.env.example`](.env.example)). **Requires a whitelisted user id**; **no LLM** required.
 - **`/token`** — Only in a **DM** with the bot (not in server channels). If you are **already whitelisted**, the bot says so and does **not** issue a new code. Otherwise it issues a random token valid for **5 minutes** and writes a pending request under `ULTRON_STATE_DIR`. A **bot admin** can run **`/approve`** with that token, or an operator on the host can run `ultron add token <token>`.
 - **`/approve token`** — **Admins only** (see below). Consumes a pending token and adds that user’s Discord id to `whitelist.json` (same as the CLI). When you approve **in Discord**, Ultron **DMs the approved user**; **`ultron add token` on the host does not send a DM** (no Discord client in that process).
 - **`/remove user_id`** — **Admins only**. Removes that numeric Discord user id from `whitelist.json` if present; otherwise replies that they were not on the whitelist.
@@ -179,7 +181,7 @@ Copy **[`config.example.yaml`](config.example.yaml)** → `config.yaml`. **Every
 
 ### Access control (whitelist)
 
-Only Discord user ids stored in `whitelist.json` (under `ULTRON_STATE_DIR`, default `./data`) may use **`/summary`**, **`/ask_issue`**, **`/note`**, **`/list_new_issues`**, **`/issues_by_status`**, **`/list_unassigned_issues`**, **`/log_time`**, and **@mention** replies. That directory is listed in `.gitignore`; keep it on the server only.
+Only Discord user ids stored in `whitelist.json` (under `ULTRON_STATE_DIR`, default `./data`) may use **`/summary`**, **`/ask_issue`**, **`/note`**, **`/list_new_issues`**, **`/issues_by_status`**, **`/list_unassigned_issues`**, **`/time_summary`**, **`/log_time`**, and **@mention** replies. That directory is listed in `.gitignore`; keep it on the server only.
 
 ### Bot admins
 
@@ -197,7 +199,7 @@ Admins may use **`/approve`** to whitelist users, **`/remove`** to drop a user i
 
 4. The user may still need the **bot owner** to OK access organizationally; the bot mentions this in DMs when access is denied.
 
-If a non-whitelisted user invokes **`/summary`**, **`/ask_issue`**, **`/note`**, **`/list_new_issues`**, **`/issues_by_status`**, **`/list_unassigned_issues`**, or **`/log_time`** in a **server channel**, Ultron removes the visible reply so others see nothing. In **DM**, they get a short English message about **`/token`**, asking a bot admin, and contacting the owner. Optional **`BOT_OWNER_CONTACT`** is appended when set.
+If a non-whitelisted user invokes **`/summary`**, **`/ask_issue`**, **`/note`**, **`/list_new_issues`**, **`/issues_by_status`**, **`/list_unassigned_issues`**, **`/time_summary`**, or **`/log_time`** in a **server channel**, Ultron removes the visible reply so others see nothing. In **DM**, they get a short English message about **`/token`**, asking a bot admin, and contacting the owner. Optional **`BOT_OWNER_CONTACT`** is appended when set.
 
 ### Long notes (Discord limit)
 
@@ -224,6 +226,8 @@ docker compose up -d --build
 ```
 
 **`.env`**, **`config.yaml`**, and **`data/`** are mounted from the host, not copied into image layers. Rebuilding the image does not discard them.
+
+Run **exactly one** live process per **`DISCORD_TOKEN`** (one Compose service replica, or one manual `docker run`). A second copy causes Discord **10062 Unknown interaction** on slash commands and confusing mixed replies (different bot versions in the same channel).
 
 The image still bakes a template from `config.example.yaml` as a default `/app/config.yaml` when no mount is used (for example plain `docker build` / `docker run` without compose).
 

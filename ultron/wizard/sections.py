@@ -267,10 +267,12 @@ def section_llm(q: Any, state: WizardState) -> None:
     print("\n--- Language model (.env + llm_chain) ---\n")
     print(
         "Ultron can run without an LLM (omit API key and llm_chain) or use a single provider from .env "
-        "or an ordered llm_chain in config.yaml. Each chain entry can list multiple models (YAML string or "
-        "list); the first is the default; /summary /ask_issue /note always list optional llm_provider and "
-        "llm_model when llm_chain is set (richer provider autocomplete and short model hint text when "
-        "discord.slash_show_llm_option_hints is true).\n"
+        "or an ordered top-level llm_chain in config.yaml (not under discord). Each chain entry lists "
+        "api_key_env: that must be the exact variable name in .env (not remapped by environment_bindings). "
+        "Use only one top-level llm_chain key; YAML duplicate keys keep the last value only. "
+        "Optional llm_provider / llm_model on slash commands: when llm_chain is active, autocomplete lists "
+        "slots and models; when there is no chain, one choice labels the env-based provider. "
+        "discord.slash_show_llm_option_hints enriches labels when true.\n"
     )
     dis = state.env_get("LLM_DISABLED") or state.env_get("ULTRON_NO_LLM")
     print(f"LLM_DISABLED / ULTRON_NO_LLM: {dis or '(unset)'}\n")

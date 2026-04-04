@@ -82,7 +82,12 @@ async def summarize_issue(
         len(user_prompt),
     )
     wf_info(logger, "summarize_issue", _WF_LLM_CALL, "issue_id=%s", issue_id)
-    display = llm_display_model if llm_display_model is not None else llm.model
+    if isinstance(llm_display_model, str) and llm_display_model.strip():
+        display = llm_display_model.strip()
+    elif isinstance(llm, LLMChainClient):
+        display = llm.display_model_for_start(start_provider)
+    else:
+        display = llm.model
     if on_before_llm is not None:
         await on_before_llm(display)
     kw = _llm_complete_kwargs(start_provider=start_provider, model_override=model_override)
@@ -140,7 +145,12 @@ async def ask_about_issue(
         len(user_prompt),
     )
     wf_info(logger, "ask_about_issue", _WF_LLM_CALL, "issue_id=%s", issue_id)
-    display = llm_display_model if llm_display_model is not None else llm.model
+    if isinstance(llm_display_model, str) and llm_display_model.strip():
+        display = llm_display_model.strip()
+    elif isinstance(llm, LLMChainClient):
+        display = llm.display_model_for_start(start_provider)
+    else:
+        display = llm.model
     if on_before_llm is not None:
         await on_before_llm(display)
     kw = _llm_complete_kwargs(start_provider=start_provider, model_override=model_override)

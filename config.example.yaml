@@ -6,9 +6,19 @@
 # environment_bindings:
 #   redmine_api_key_env: MY_REDMINE_KEY
 
-# timezone — IANA name for report headers and date formatting; empty string loads as UTC.
+# timezone — IANA name for report headers and date formatting; empty string loads as UTC. Also used for /time_summary calendar buckets (today, week).
 # Example: Europe/Madrid
 timezone: ""
+
+# redmine — Non-secret Redmine options (API keys stay in .env). Used for /time_summary user resolution when login lookup via the API is not allowed.
+redmine:
+  # user_id_by_login — Map Redmine login (key) → numeric Redmine user id. Keys are matched case-insensitively.
+  # Example: { "jdoe": 42 }
+  user_id_by_login: {}
+
+  # time_summary_max_entries — Max time entries fetched for /time_summary (paginated). Null uses default 2000 (clamped 50–5000).
+  # Example: 2000
+  time_summary_max_entries: null
 
 discord:
   # ephemeral_default — If true, /summary, /ask_issue, /note default to ephemeral replies (only the user sees them). Null uses default true.
@@ -39,7 +49,7 @@ discord:
   # Example: true
   nl_commands: null
 
-  # slash_show_llm_option_hints — If true, richer llm_provider autocomplete (endpoint when multiple chain slots; no duplicate model name there) and short llm_model option text pointing to autocomplete + llm_chain. Null uses default false.
+  # slash_show_llm_option_hints — If true, richer llm_provider autocomplete when llm_chain is active (endpoint when multiple slots) and clearer llm_model hints. When there is no YAML llm_chain, llm_provider still shows one choice for the single env-based provider. Null uses default false.
   # Example: true
   slash_show_llm_option_hints: null
 
@@ -126,18 +136,23 @@ logging:
   # Example: false
   log_read_messages: null
 
-# llm_chain — Ordered providers: index 0 is primary, then fallbacks. Empty list [] means use LLM_* variables from .env instead.
-# Each entry needs base_url, model, api_key_env; optional name, enabled, timeout_seconds, max_retries.
-# model — Single string or ordered list of strings; first is the default model for that provider (slash / autocomplete can pick others when multiple).
+# llm_chain — Top-level key only (not under discord). Ordered OpenAI-compatible providers: index 0 is primary, then fallbacks.
+# Use exactly one top-level `llm_chain` key in this file; YAML duplicate keys are invalid for humans — the parser keeps the last value only, so a stray `llm_chain: []` after your list wipes the chain.
+# Empty list [] or omit the key → single provider from process environment: LLM_* (or names overridden by environment_bindings above).
+# Each entry requires base_url, model, api_key_env; optional name, enabled, timeout_seconds, max_retries.
+# api_key_env — Literal environment variable name whose value is the API key for that slot. It is read with os.environ; it is NOT remapped by environment_bindings (bindings only affect default DISCORD_/REDMINE_/LLM_* names for the env-only path). Your .env must define the variable named here.
+# model — Single string or ordered list of strings; first is the default for that provider; extras appear in llm_model autocomplete when llm_chain is active.
+# enabled: false — Entry is skipped; if every entry is disabled, Ultron behaves as if there were no chain (falls back to LLM_* env) and emits a startup warning.
 llm_chain: []
 
-# Example chain (uncomment and set api_key_env to real env var names holding keys):
+# Example chain (uncomment as a single block; set api_key_env to names that exist in your .env):
 # llm_chain:
 #   - name: "local-ollama"
 #     enabled: true
 #     base_url: "http://127.0.0.1:11434/v1"
 #     model: ["llama3.2", "mistral"]
-#     api_key_env: "OLLAMA_API_KEY"
+#     # Ollama still expects a key string in the OpenAI client; reuse LLM_API_KEY with value `ollama` in .env, or any dedicated var:
+#     api_key_env: "LLM_API_KEY"
 #     timeout_seconds: 900
 #     max_retries: 0
 #   - name: "openai-fallback"

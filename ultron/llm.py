@@ -281,6 +281,21 @@ class LLMClient:
             )
         return out
 
+    async def ping_minimal(self) -> None:
+        """One token chat completion to verify connectivity and credentials (doctor / health checks)."""
+        try:
+            client = self._sdk()
+            await client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "Reply with the single letter A."},
+                    {"role": "user", "content": "ping"},
+                ],
+                max_tokens=1,
+            )
+        finally:
+            await self.shutdown_sdk_client()
+
 
 @dataclass
 class LLMChainClient:
@@ -334,6 +349,20 @@ class LLMChainClient:
     @property
     def model(self) -> str:
         return self._clients[0].model
+
+    def display_model_for_start(self, start_provider: str | None) -> str:
+        """Primary model label for the chain slot selected by ``start_provider`` (not always slot 0)."""
+        idx = self._resolve_start_index(start_provider)
+        return self._clients[idx].model
+
+    @property
+    def primary_base_url(self) -> str:
+        """OpenAI-compatible base URL for the first chain entry."""
+        return self._clients[0].base_url
+
+    async def ping_primary(self) -> None:
+        """Ping only the first chain entry (same primary as ``model``)."""
+        await self._clients[0].ping_minimal()
 
     async def complete(
         self,
