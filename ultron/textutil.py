@@ -1,6 +1,25 @@
 from __future__ import annotations
 
 
+def format_issue_metadata_header(issue: dict) -> str:
+    """One-line Discord markdown: note count, logged time, last update (Redmine issue JSON)."""
+    journals = issue.get("journals") or []
+    note_count = sum(1 for j in journals if str(j.get("notes") or "").strip())
+    raw_spent = issue.get("spent_hours")
+    if raw_spent is None:
+        spent_str = "0 h"
+    else:
+        try:
+            h = float(raw_spent)
+            spent_str = f"{h:g} h" if h == int(h) else f"{h:.2f} h"
+        except (TypeError, ValueError):
+            spent_str = str(raw_spent)
+    updated = issue.get("updated_on") or "—"
+    return (
+        f"**Notes:** {note_count}  ·  **Total time logged:** {spent_str}  ·  **Last updated:** {updated}"
+    )
+
+
 def chunk_discord(text: str, limit: int = 1900) -> list[str]:
     """Split text into chunks under Discord's ~2000 char message limit."""
     text = text.strip()

@@ -1,0 +1,56 @@
+---
+description: Phase tags ([INPUT], [OUTPUT], …) and action strings for bot logging
+globs: ultron/bot.py,ultron/__main__.py
+alwaysApply: false
+---
+
+# Ultron: log phases and action text
+
+Console lines use **`%(phase_colored)s`** (see `ultron/__main__.py`: `UltronColoredFormatter` / `UltronPlainFormatter`). The bracket tag is built from **`LogRecord` attributes**, not from the message string:
+
+- **Slash commands:** pass `extra={"slash_phase": "<NAME>", "message_source": "slash"}`.
+- **Chat / @mention:** pass `extra={"chat_phase": "<NAME>", "message_source": "chat"}`.
+- **Process startup** (`ultron/__main__.py` `_run`): pass `extra={"startup_phase": "STARTUP", "message_source": "startup"}` (do not spell `STARTUP |` inside the message).
+
+Precedence: **`chat_phase` → `slash_phase` → `startup_phase`** (first non-empty wins).
+
+## Allowed phase names (and colors)
+
+Defined in **`_PhaseColoredMixin._PHASE_COLORS`** in `ultron/__main__.py`:
+
+| Phase | Typical use |
+|-------|-------------|
+| `INPUT` | Work started: command received (slash) or mention accepted for processing (chat). |
+| `OUTPUT` | User-visible success: reply sent, message edited, delivery complete. |
+| `ERROR` | Failure worth `warning` (often with `detail=`). |
+| `DENIED` | Gate rejected (e.g. not whitelisted, admin command in NL path). |
+| `RECEIVED` | Raw @mention / reply seen before whitelist routing. |
+| `IGNORE` | Mention not acted on (e.g. not whitelisted). |
+| `ROUTER` | NL router / dispatch steps between INPUT and OUTPUT. |
+| `STARTUP` | Boot checks before `bot.start` (config, Redmine ping). |
+
+If you introduce a **new** phase string, add it to **`_PHASE_COLORS`** so TTY output is not plain white.
+
+## New features: use helpers and consistent `action`
+
+Prefer **`log_slash_input` / `log_slash_output` / `log_slash_error` / `log_slash_denied`** and **`log_chat_mention_*`** in `ultron/bot.py` so `slash_phase` / `chat_phase` and dual-logger output stay correct.
+
+For **`log_slash_output`** and **`log_chat_mention_output`**, the **`action`** argument is the human-readable step (lowercase phrase, e.g. `sent help text (ephemeral)`, `delivered summary to user`). Match existing style: short, past-tense or gerund, no trailing period.
+
+```python
+# ✅ GOOD: phase comes from extra; action describes what happened
+log_slash_output("summary", interaction, action="delivered summary to user", fields=f"issue_id={issue_id}")
+
+# ❌ BAD: ad-hoc logger.info without slash_phase/chat_phase — no [INPUT]/[OUTPUT] tag
+logger.info("summary done for %s", issue_id)
+```
+
+```python
+# ✅ GOOD: chat uses chat_phase via helper
+log_chat_mention_output(message, action="reply sent (needs LLM)", feature="nl_router")
+
+# ❌ BAD: missing extra — phase prefix is empty
+logger.info("nl_router: sent reply")
+```
+
+When you add **`logger.info(..., extra={...})`** directly (e.g. NL router internals), copy the same **`chat_phase` / `slash_phase`** and **`message_source`** values as the helpers above, and log to **`ultron.commands`** / **`ultron.chat`** as appropriate.

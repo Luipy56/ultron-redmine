@@ -8,9 +8,7 @@ _MINIMAL_NO_LLM = """\
 timezone: UTC
 discord: {}
 reports: {}
-schedules:
-  abandoned: {}
-  stale_new: {}
+report_schedule: []
 logging: {}
 """
 

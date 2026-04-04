@@ -1,0 +1,15 @@
+services:
+  ultron:
+    build: .
+    working_dir: /app
+    env_file:
+      - .env
+    environment:
+      CONFIG_PATH: config.yaml
+      ULTRON_STATE_DIR: /app/data
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./config.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+    restart: unless-stopped
+    init: true

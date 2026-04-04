@@ -1,0 +1,26 @@
+---
+description: When adding config, env, or install-time settings, keep ultron wizard in sync
+globs: config.example.yaml,ultron/config.py,ultron/wizard/**/*.py
+alwaysApply: false
+---
+
+# Ultron: configuration wizard parity
+
+When you add or change **user-facing configuration** (YAML keys, defaults in `config.example.yaml`, `ultron/config.py` schema, or **`.env` variables** the app reads at startup), update the interactive wizard under **`ultron/wizard/`** in the **same change** so `ultron wizard` still reflects reality.
+
+## What to touch (typical)
+
+- **`ultron/wizard/sections.py`** — prompts and writes for the affected area (paths, Redmine, Discord, admins, LLM, YAML behavior, etc.).
+- **`ultron/wizard/main.py`** — main menu labels and `section_handlers` if you add/remove/rename a section.
+- **`ultron/wizard/yaml_io.py`** — if merge/load behavior or defaults from `config.example.yaml` need to match new structure.
+- **`ultron/wizard/state.py`** — only if the wizard needs new session fields beyond `env` / `yaml_data`.
+- **`ultron/wizard/masking.py`** — if new sensitive `.env` keys should be masked in the wizard summary.
+- **Tests** — extend **`tests/test_wizard_io.py`** (or add tests) when YAML merge, defaults, or env behavior changes.
+
+## Features without schema changes
+
+If a feature only adds **code paths** but still introduces **new knobs** users set via YAML or `.env`, treat that like a config change: update the wizard (and usually **`config.example.yaml`** — see **`.cursor/rules/ultron-config-help-nl-parity.mdc`**).
+
+## Smoke check
+
+With `pip install -e ".[wizard]"`, run **`ultron wizard`** and confirm the main menu loads and the edited section still reads/writes correctly (see **`docs/RELEASE_CHECKLIST.md`**).

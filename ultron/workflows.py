@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from ultron.llm import ChainSkipCallback, LLMBackend, LLMChainClient
 from ultron.readlog import log_read_payload
 from ultron.redmine import IssueNotFound, RedmineClient
-from ultron.textutil import format_issue_for_summary
+from ultron.textutil import format_issue_for_summary, format_issue_metadata_header
 from ultron.workflow_log import wf_info
 
 SUMMARY_SYSTEM = (
@@ -43,20 +43,34 @@ _WF_LLM_DONE = "LLM_DONE"
 _WF_REDMINE_WRITE = "REDMINE_WRITE"
 
 
+def _llm_complete_kwargs(
+    *,
+    start_provider: str | None,
+    model_override: str | None,
+) -> dict[str, str | None]:
+    return {"start_provider": start_provider, "model_override": model_override}
+
+
 async def summarize_issue(
     *,
     redmine: RedmineClient,
     llm: LLMBackend,
     issue_id: int,
     log_read_messages: bool = False,
-    on_before_llm: Callable[[], Awaitable[None]] | None = None,
+    on_before_llm: Callable[[str], Awaitable[None]] | None = None,
     on_llm_chain_skip: ChainSkipCallback | None = None,
+    issue_metadata_header: bool = True,
+    start_provider: str | None = None,
+    model_override: str | None = None,
+    llm_display_model: str | None = None,
 ) -> str:
     issue = await redmine.get_issue(issue_id)
+    meta = format_issue_metadata_header(issue) if issue_metadata_header else ""
     body = format_issue_for_summary(issue)
-    user_prompt = f"Summarize this Redmine ticket as requested by a teammate.\n\n{body}"
+    ticket_block = f"{meta}\n\n{body}" if meta else body
+    user_prompt = f"Summarize this Redmine ticket as requested by a teammate.\n\n{ticket_block}"
     if log_read_messages:
-        log_read_payload(label=f"summary.issue_id={issue_id}.formatted_body", text=body)
+        log_read_payload(label=f"summary.issue_id={issue_id}.formatted_body", text=ticket_block)
         log_read_payload(label=f"summary.issue_id={issue_id}.llm_system", text=SUMMARY_SYSTEM)
         log_read_payload(label=f"summary.issue_id={issue_id}.llm_user", text=user_prompt)
     wf_info(
@@ -68,16 +82,19 @@ async def summarize_issue(
         len(user_prompt),
     )
     wf_info(logger, "summarize_issue", _WF_LLM_CALL, "issue_id=%s", issue_id)
+    display = llm_display_model if llm_display_model is not None else llm.model
     if on_before_llm is not None:
-        await on_before_llm()
+        await on_before_llm(display)
+    kw = _llm_complete_kwargs(start_provider=start_provider, model_override=model_override)
     if isinstance(llm, LLMChainClient) and on_llm_chain_skip is not None:
         out = await llm.complete(
             system=SUMMARY_SYSTEM,
             user=user_prompt,
             on_chain_skip=on_llm_chain_skip,
+            **kw,
         )
     else:
-        out = await llm.complete(system=SUMMARY_SYSTEM, user=user_prompt)
+        out = await llm.complete(system=SUMMARY_SYSTEM, user=user_prompt, **kw)
     wf_info(
         logger,
         "summarize_issue",
@@ -86,6 +103,8 @@ async def summarize_issue(
         issue_id,
         len(out),
     )
+    if meta:
+        return f"{meta}\n\n{out.strip()}"
     return out
 
 
@@ -96,14 +115,20 @@ async def ask_about_issue(
     issue_id: int,
     question: str,
     log_read_messages: bool = False,
-    on_before_llm: Callable[[], Awaitable[None]] | None = None,
+    on_before_llm: Callable[[str], Awaitable[None]] | None = None,
     on_llm_chain_skip: ChainSkipCallback | None = None,
+    issue_metadata_header: bool = True,
+    start_provider: str | None = None,
+    model_override: str | None = None,
+    llm_display_model: str | None = None,
 ) -> str:
     issue = await redmine.get_issue(issue_id)
+    meta = format_issue_metadata_header(issue) if issue_metadata_header else ""
     body = format_issue_for_summary(issue)
-    user_prompt = f"Teammate question:\n{question}\n\n---\nRedmine ticket:\n{body}"
+    ticket_block = f"{meta}\n\n{body}" if meta else body
+    user_prompt = f"Teammate question:\n{question}\n\n---\nRedmine ticket:\n{ticket_block}"
     if log_read_messages:
-        log_read_payload(label=f"ask_issue.issue_id={issue_id}.formatted_body", text=body)
+        log_read_payload(label=f"ask_issue.issue_id={issue_id}.formatted_body", text=ticket_block)
         log_read_payload(label=f"ask_issue.issue_id={issue_id}.llm_system", text=ASK_ABOUT_ISSUE_SYSTEM)
         log_read_payload(label=f"ask_issue.issue_id={issue_id}.llm_user", text=user_prompt)
     wf_info(
@@ -115,16 +140,19 @@ async def ask_about_issue(
         len(user_prompt),
     )
     wf_info(logger, "ask_about_issue", _WF_LLM_CALL, "issue_id=%s", issue_id)
+    display = llm_display_model if llm_display_model is not None else llm.model
     if on_before_llm is not None:
-        await on_before_llm()
+        await on_before_llm(display)
+    kw = _llm_complete_kwargs(start_provider=start_provider, model_override=model_override)
     if isinstance(llm, LLMChainClient) and on_llm_chain_skip is not None:
         out = await llm.complete(
             system=ASK_ABOUT_ISSUE_SYSTEM,
             user=user_prompt,
             on_chain_skip=on_llm_chain_skip,
+            **kw,
         )
     else:
-        out = await llm.complete(system=ASK_ABOUT_ISSUE_SYSTEM, user=user_prompt)
+        out = await llm.complete(system=ASK_ABOUT_ISSUE_SYSTEM, user=user_prompt, **kw)
     wf_info(
         logger,
         "ask_about_issue",
@@ -133,6 +161,8 @@ async def ask_about_issue(
         issue_id,
         len(out),
     )
+    if meta:
+        return f"{meta}\n\n{out.strip()}"
     return out
 
 
@@ -154,6 +184,8 @@ async def add_formatted_note(
     log_read_messages: bool = False,
     on_llm_chain_skip: ChainSkipCallback | None = None,
     note_author_label: str | None = None,
+    start_provider: str | None = None,
+    model_override: str | None = None,
 ) -> tuple[str, str]:
     """Returns (posted_note_body, issue_url). Raises IssueNotFound if missing."""
     await redmine.get_issue(issue_id, includes="journals")
@@ -175,14 +207,16 @@ async def add_formatted_note(
         len(user_prompt),
     )
     wf_info(logger, "add_formatted_note", _WF_LLM_CALL, "issue_id=%s", issue_id)
+    kw = _llm_complete_kwargs(start_provider=start_provider, model_override=model_override)
     if isinstance(llm, LLMChainClient) and on_llm_chain_skip is not None:
         formatted = await llm.complete(
             system=NOTE_SYSTEM,
             user=user_prompt,
             on_chain_skip=on_llm_chain_skip,
+            **kw,
         )
     else:
-        formatted = await llm.complete(system=NOTE_SYSTEM, user=user_prompt)
+        formatted = await llm.complete(system=NOTE_SYSTEM, user=user_prompt, **kw)
     wf_info(
         logger,
         "add_formatted_note",

@@ -1,12 +1,14 @@
 ---
-description: All code comments, docstrings, and docs must be written in English
+description: Source code, comments, docs, tutorials, and /help text in English
 alwaysApply: true
 ---
 
 # English only (repository text)
 
-- **Comments and docstrings** in source files (`.py`, etc.): write only in **English**.
-- **Documentation**: `README`, `.md`, `.mdc` rules, inline comments in `config.example.yaml` / similar: **English** only.
+- **Source code**: logic, symbol names, type hints, and **comments/docstrings** in `.py` and other source: **English** only.
+- **Documentation**: `README`, `docs/**`, `.md`, `.mdc` rules, inline comments in `config.example.yaml` / similar: **English** only.
+- **Tutorials and operational guides**: any how-to under `docs/` or the wiki: **English** only.
+- **Discord `/help`** (`_HELP_TEXT` and the same content shown by the `/help` command in `ultron/bot.py`): **English** only, consistent with the rest of that block. Do not add non-English bullets there.
 - **Identifiers** (when they carry meaning): prefer English names for symbols the team reads in code reviews.
 
 Do not mix Spanish, German, or other languages in the above, even for short notes or section headers.
@@ -19,4 +21,4 @@ Do not mix Spanish, German, or other languages in the above, even for short note
 # Resuelve el id de estado desde Redmine.
 ```
 
-If product copy for end users must be localized, keep that separate from developer-facing text and follow team policy; default for anything committed as **code comments or docs** remains English.
+If product copy for end users must be localized, keep it in **dedicated** functions or constants, not in `_HELP_TEXT`, docstrings, or repo markdown. Default for anything committed as **developer-facing or primary docs** remains **English**.

@@ -1,5 +1,8 @@
 .env
+.env.bak.*
 config.yaml
+config.yaml.bak.*
+config.yaml.backup.*
 data/
 .venv/
 venv/

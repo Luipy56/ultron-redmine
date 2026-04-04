@@ -12,9 +12,7 @@ def test_discord_new_issues_defaults(tmp_path: Path) -> None:
 timezone: UTC
 discord: {}
 reports: {}
-schedules:
-  abandoned: {}
-  stale_new: {}
+report_schedule: []
 logging: {}
 llm_chain: []
 """,
@@ -38,9 +36,7 @@ discord:
     list_limit: 15
     min_age_days: 3
 reports: {}
-schedules:
-  abandoned: {}
-  stale_new: {}
+report_schedule: []
 logging: {}
 llm_chain: []
 """,

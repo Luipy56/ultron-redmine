@@ -1,0 +1,20 @@
+---
+description: Never overwrite .env without backup; use isolated paths for Docker/CI-style commands
+alwaysApply: true
+---
+
+# Ultron: `.env` safety
+
+## Do not clobber the developer’s `.env`
+
+- **Never** run `cp .env.example .env`, `mv`, `echo >`, or similar in the **repository root** (or any path that would replace the user’s real **`.env`**) unless the user **explicitly** asked to reset or recreate that file.
+- Before any intentional overwrite of an existing **`.env`**, **copy it aside first**, e.g. `cp .env ".env.bak.$(date +%Y%m%d%H%M%S)"` (or the user’s chosen backup name), then apply the change.
+
+## Docker / Compose / smoke tests (agents)
+
+- Prefer **`mktemp -d`**: copy **`.env.example`**, **`config.example.yaml`**, and create **`data`** **only under that temp directory**, then run **`docker compose`** / **`docker run`** with **explicit `-v` / `--env-file`** pointing at those temp files, **without** touching **`./.env`** in the workspace.
+- If the project’s CI workflow copies **`.env.example` → `.env`**, treat that as **valid only on ephemeral CI checkouts** — **do not reuse that exact sequence** when working in a developer’s local clone.
+
+## Secrets in chat
+
+- If secrets were pasted into a chat, tell the user to **rotate** them (e.g. Discord bot token, Redmine API key); do not repeat full secret values back in follow-up messages.

@@ -17,9 +17,9 @@ NL_ALLOWED_COMMANDS: frozenset[str] = frozenset(
         "ping",
         "help",
         "status",
-        "new_issues",
+        "list_new_issues",
         "issues_by_status",
-        "unassigned_issues",
+        "list_unassigned_issues",
         "summary",
         "ask_issue",
         "note",
@@ -61,9 +61,9 @@ Allowed command names and args (only these):
 - ping — args {}
 - help — args {}
 - status — args {}
-- new_issues — args {} (uses server config for which Redmine status)
+- list_new_issues — args {} (uses server config for which Redmine status)
 - issues_by_status — args {"status":"<exact Redmine status name string>"}
-- unassigned_issues — args {}
+- list_unassigned_issues — args {}
 - summary — args {"issue_id": <positive integer>}
 - ask_issue — args {"issue_id": <int>, "question": "<non-empty string>"}
 - note — args {"issue_id": <int>, "text": "<non-empty note body>"}
@@ -146,7 +146,7 @@ def _as_nonempty_str(v: Any, field: str) -> str:
 def _validate_args(command: str, args: Any) -> dict[str, Any]:
     if not isinstance(args, dict):
         raise ValueError("args must be a JSON object")
-    if command in ("ping", "help", "status", "new_issues", "unassigned_issues"):
+    if command in ("ping", "help", "status", "list_new_issues", "list_unassigned_issues"):
         if args:
             raise ValueError(f"{command} expects empty args {{}}")
         return {}
@@ -191,6 +191,10 @@ def parse_router_json_text(text: str) -> NLRouterOutcome:
     if not isinstance(cmd_raw, str) or not cmd_raw.strip():
         return NLParseError("invoke.command missing")
     cmd = cmd_raw.strip().lower()
+    if cmd == "new_issues":
+        cmd = "list_new_issues"
+    if cmd == "unassigned_issues":
+        cmd = "list_unassigned_issues"
 
     if cmd in NL_FORBIDDEN_COMMANDS:
         return NLAdminRejected(command=cmd)

@@ -6,7 +6,7 @@ This document is for **people who use the bot in Discord**, not for server opera
 
 - You need access to a server where **Ultron** is already invited, or a **DM** with the bot (for `/token`).
 - Many commands only work after an **administrator has approved** your Discord account (whitelist).
-- **`/summary`**, **`/ask_issue`**, and **`/note`** need a **configured language model** on the host. If the operator runs Ultron without an LLM, those commands stay disabled; listing commands such as **`/new_issues`** still work.
+- **`/summary`**, **`/ask_issue`**, and **`/note`** need a **configured language model** on the host. If the operator runs Ultron without an LLM, those commands stay disabled; listing commands such as **`/list_new_issues`** and **`/list_unassigned_issues`** still work.
 
 ## Getting access (whitelist)
 
@@ -31,7 +31,7 @@ If you **@mention** the bot (or **reply** to one of its messages) in a channel o
 
 ## Whitelist vs bot admins
 
-- **Whitelist** — Users who may use Redmine-related slash commands (`/summary`, `/ask_issue`, `/note`, `/new_issues`, etc.) as configured by your team.
+- **Whitelist** — Users who may use Redmine-related slash commands (`/summary`, `/ask_issue`, `/note`, `/list_new_issues`, `/list_unassigned_issues`, etc.) as configured by your team.
 - **Bot admins** — Users who may **`/approve`** and **`/remove`** whitelist entries. They are a smaller group.
 
 If a command says you are not allowed, follow your organization’s process (often **`/token`** + admin approval). Optional **`BOT_OWNER_CONTACT`** in the bot configuration may point you to who can help.

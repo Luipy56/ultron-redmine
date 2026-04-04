@@ -27,7 +27,7 @@ def _load_dotenv() -> None:
 
 
 class _PhaseColoredMixin:
-    """Inject %(phase_colored)s after the level: chat_phase (if set) else slash_phase."""
+    """Inject %(phase_colored)s after the level: chat_phase, else slash_phase, else startup_phase."""
 
     _PHASE_COLORS = {
         # Slash commands (extra slash_phase=…)
@@ -39,10 +39,16 @@ class _PhaseColoredMixin:
         "RECEIVED": "bold_blue",
         "IGNORE": "purple",
         "ROUTER": "bold_yellow",
+        # Boot sequence in __main__._run (extra startup_phase=…)
+        "STARTUP": "bold_light_purple",
     }
 
     def _phase_prefix(self, record: logging.LogRecord) -> str:
-        phase = getattr(record, "chat_phase", None) or getattr(record, "slash_phase", None)
+        phase = (
+            getattr(record, "chat_phase", None)
+            or getattr(record, "slash_phase", None)
+            or getattr(record, "startup_phase", None)
+        )
         if not phase:
             return ""
         if not sys.stderr.isatty():
@@ -151,33 +157,34 @@ async def _run() -> None:
     log = logging.getLogger("ultron")
     env = load_env()
     cfg_path = Path(env.config_path)
+    _su = {"startup_phase": "STARTUP", "message_source": "startup"}
     if not cfg_path.is_file():
-        log.error("STARTUP | config file not found: %s", cfg_path.resolve())
+        log.error("config file not found: %s", cfg_path.resolve(), extra=_su)
         sys.exit(1)
     try:
         app_cfg = load_config(cfg_path)
     except ValueError as e:
-        log.error("STARTUP | invalid config: %s", e)
+        log.error("invalid config: %s", e, extra=_su)
         sys.exit(1)
 
     redmine = RedmineClient(base_url=env.redmine_url, api_key=env.redmine_api_key)
-    log.info("STARTUP | testing Redmine connection | base_url=%s", env.redmine_url.rstrip("/"))
+    log.info("testing Redmine connection | base_url=%s", env.redmine_url.rstrip("/"), extra=_su)
     try:
         await redmine.verify_connection()
     except RedmineError as e:
-        log.error("STARTUP | Redmine connection failed: %s", e)
+        log.error("Redmine connection failed: %s", e, extra=_su)
         sys.exit(1)
     except httpx.RequestError as e:
-        log.error("STARTUP | Redmine connection failed (network): %s", e)
+        log.error("Redmine connection failed (network): %s", e, extra=_su)
         sys.exit(1)
-    log.info("STARTUP | Redmine OK")
+    log.info("Redmine OK", extra=_su)
 
     llm: LLMBackend
     if app_cfg.llm_chain is not None:
         try:
             resolved = resolve_llm_chain(app_cfg.llm_chain)
         except RuntimeError as e:
-            log.error("%s", e)
+            log.error("%s", e, extra=_su)
             sys.exit(1)
         llm = LLMChainClient.from_resolved(resolved)
         chain_parts: list[str] = []
@@ -190,12 +197,14 @@ async def _run() -> None:
             "LLM configured | backend=chain | order=%s | primary_model=%r",
             " -> ".join(chain_parts),
             llm.model,
+            extra=_su,
         )
     elif not env.llm_enabled:
         llm = NullLLMBackend()
         log.info(
             "LLM not configured | backend=none | Redmine slash commands and registration work; "
-            "/summary, /ask_issue, and /note require a language model"
+            "/summary, /ask_issue, and /note require a language model",
+            extra=_su,
         )
     else:
         llm = LLMClient(
@@ -209,15 +218,18 @@ async def _run() -> None:
             "LLM configured | backend=single | model=%r | endpoint=%s",
             llm.model,
             format_llm_endpoint(llm.base_url),
+            extra=_su,
         )
     if env.discord_message_content_intent:
         log.info(
-            "Discord | message content intent: ON (privileged; portal must match — needed if mentions are empty without it)"
+            "Discord | message content intent: ON (privileged; portal must match — needed if mentions are empty without it)",
+            extra=_su,
         )
     else:
         log.info(
             "Discord | message content intent: OFF (guild/DM message events still on; set "
-            "DISCORD_MESSAGE_CONTENT_INTENT=1 + portal if @mentions do not trigger)"
+            "DISCORD_MESSAGE_CONTENT_INTENT=1 + portal if @mentions do not trigger)",
+            extra=_su,
         )
     nl_cfg = app_cfg.discord.nl_commands or env.ultron_nl_commands
     log.info(
@@ -226,7 +238,19 @@ async def _run() -> None:
         "ON" if nl_cfg else "OFF",
         app_cfg.discord.nl_commands,
         env.ultron_nl_commands,
+        extra=_su,
     )
+    if env.discord_guild_id is not None:
+        log.info(
+            "Discord | slash commands: will sync to guild %s (set DISCORD_GUILD_ID=0 for global sync)",
+            env.discord_guild_id,
+            extra=_su,
+        )
+    else:
+        log.info(
+            "Discord | slash commands: global sync (DISCORD_GUILD_ID=0 or global; may take up to ~1 hour)",
+            extra=_su,
+        )
     bot = UltronBot(env=env, app_cfg=app_cfg, redmine=redmine, llm=llm)
     try:
         await bot.start(env.discord_token)

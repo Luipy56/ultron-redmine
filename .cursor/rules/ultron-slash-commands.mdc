@@ -1,6 +1,6 @@
 ---
 description: When adding, changing, or removing Discord slash commands, sync docs and access control
-globs: ultron/bot.py,README.md,.env.example
+globs: ultron/bot.py,ultron/nl_router.py,README.md,.env.example
 alwaysApply: false
 ---
 
@@ -10,25 +10,26 @@ Whenever you **add, rename, remove, or change behavior** of a Discord slash comm
 
 ## Code (`ultron/bot.py`)
 
-1. **Handler** — `@self.tree.command` / options / `describe` / ephemeral vs public replies.
+1. **Handler** — `@self.tree.command` / options / `describe` / ephemeral vs public replies. LLM commands **`/summary`**, **`/ask_issue`**, **`/note`** are registered via **`_register_slash_summary_ask_note()`** (optional **`llm_provider`** / **`llm_model`** when `llm_chain` is non-empty; see **`llm_chain_slash_flags`** in `ultron/config.py`); update that method when those options or autocomplete change.
 2. **`_tree_interaction_check`** (`_tree_interaction_check` / `_slash_command_name`) — Correct bucket:
    - **Everyone:** `token`, `help` (and any new public command).
-   - **Whitelisted:** default path after admin checks; **`ping`** is special (whitelist only, then deny like summary/ask_issue/note). **`new_issues`**, **`issues_by_status`**, **`unassigned_issues`** — same. **`dev_slot_2` … `dev_slot_10`** — same (reserved dev placeholders).
+   - **Whitelisted:** default path after admin checks; **`ping`** is special (whitelist only, then deny like summary/ask_issue/note). **`list_new_issues`**, **`issues_by_status`**, **`list_unassigned_issues`** — same. **`dev_slot_2` … `dev_slot_10`** — same (reserved dev placeholders).
    - **Bot admins only:** same pattern as `approve` / `remove` (`is_admin`, deny reply + logging).
 3. **`_HELP_TEXT`** — Mirror the real matrix: sections **Everyone**, **Whitelisted users**, **Bot admins only**; exact command names and options.
-4. **Logging** — Use `log_slash_input` / `log_slash_output` / `log_slash_error` / `log_slash_denied` (and `extra={"slash_phase": ...}` is handled by helpers); no duplicate ad-hoc command logs.
+4. **Natural-language router** — If the command is exposed to @mention routing, update `ultron/nl_router.py` (`NL_ALLOWED_COMMANDS`, `NL_FORBIDDEN_COMMANDS`, `NL_ROUTER_SYSTEM`, `_validate_args`) and in `ultron/bot.py` **`_nl_dispatch_status_line`** + **`_run_nl_invoke`**. See **`.cursor/rules/ultron-config-help-nl-parity.mdc`**.
+5. **Logging** — Use `log_slash_input` / `log_slash_output` / `log_slash_error` / `log_slash_denied` (and `extra={"slash_phase": ...}` is handled by helpers); no duplicate ad-hoc command logs.
 
 ## Docs and config
 
-5. **`README.md`** — Section **Slash commands**; **Access control** / **Bot admins** if who may run what changed.
-6. **`.env.example`** — If comments mention specific commands (e.g. admin-only commands), keep them accurate.
-7. **`config.example.yaml` / `config.yaml`** — Only if the command depends on new or renamed config keys.
+6. **`README.md`** — Section **Slash commands**; **Access control** / **Bot admins** if who may run what changed.
+7. **`.env.example`** — If comments mention specific commands (e.g. admin-only commands), keep them accurate.
+8. **`config.example.yaml` / `config.yaml`** — Only if the command depends on new or renamed config keys; use the comment style in **`.cursor/rules/ultron-config-help-nl-parity.mdc`**.
 
 ## State and CLI parity (when relevant)
 
-8. **`ultron/state_store.py`** — If the command reads/writes whitelist, admins, or pending tokens.
-9. **`ultron/cli.py`** — If there is a host-side equivalent (e.g. `ultron add token`), consider documenting or adding a matching subcommand.
+9. **`ultron/state_store.py`** — If the command reads/writes whitelist, admins, or pending tokens.
+10. **`ultron/cli.py`** — If there is a host-side equivalent (e.g. `ultron add token`), consider documenting or adding a matching subcommand.
 
 ## Runtime
 
-10. **Slash sync** — New or renamed commands require a bot restart (and guild sync if you use `DISCORD_GUILD_ID`); global registration can take up to ~1 hour to appear everywhere.
+11. **Slash sync** — New or renamed commands require a bot restart (and guild sync if you use `DISCORD_GUILD_ID`); global registration can take up to ~1 hour to appear everywhere.

@@ -63,24 +63,12 @@ def load_default_config_from_example(repo_root: Path) -> dict[str, Any]:
                 "closed_status_prefixes": [],
             },
         },
-        "reports": {"channel_id": 0},
-        "schedules": {
-            "abandoned": {
-                "enabled": None,
-                "interval_hours": None,
-                "max_days_without_update": None,
-                "max_issues": None,
-            },
-            "stale_new": {
-                "enabled": None,
-                "interval_hours": None,
-                "min_age_hours": None,
-                "require_unassigned": None,
-                "max_journal_entries": None,
-                "max_issues": None,
-                "issue_status_name": None,
-            },
+        "reports": {
+            "channel_id": 0,
+            "startup_message_enabled": None,
+            "startup_welcome": "",
         },
+        "report_schedule": [],
         "logging": {"log_read_messages": None},
         "llm_chain": [],
     }

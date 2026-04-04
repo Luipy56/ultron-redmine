@@ -58,29 +58,6 @@ def format_llm_endpoint(base_url: str) -> str:
     return f"{host}{path}"
 
 
-class LLMBackend(Protocol):
-    """Anything Ultron uses for chat completions (single provider or chain)."""
-
-    @property
-    def model(self) -> str: ...
-
-    async def complete(self, *, system: str, user: str) -> str: ...
-
-
-@dataclass(frozen=True)
-class NullLLMBackend:
-    """Placeholder when no language model is configured; ``complete`` must not be used for real work."""
-
-    @property
-    def model(self) -> str:
-        return "(none)"
-
-    async def complete(self, *, system: str, user: str) -> str:
-        raise NoLLMConfiguredError(
-            "No language model is configured. Set LLM_* in the environment or define llm_chain in config.yaml."
-        )
-
-
 def _should_fallback_to_next_provider(exc: BaseException) -> bool:
     """Try the next llm_chain entry on transport failures and any HTTP error from the API.
 
@@ -189,6 +166,45 @@ class ChainSkipNotice:
 ChainSkipCallback = Callable[[ChainSkipNotice], Awaitable[None]]
 
 
+class LLMBackend(Protocol):
+    """Anything Ultron uses for chat completions (single provider or chain)."""
+
+    @property
+    def model(self) -> str: ...
+
+    async def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        on_chain_skip: ChainSkipCallback | None = None,
+        start_provider: str | None = None,
+        model_override: str | None = None,
+    ) -> str: ...
+
+
+@dataclass(frozen=True)
+class NullLLMBackend:
+    """Placeholder when no language model is configured; ``complete`` must not be used for real work."""
+
+    @property
+    def model(self) -> str:
+        return "(none)"
+
+    async def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        on_chain_skip: ChainSkipCallback | None = None,
+        start_provider: str | None = None,
+        model_override: str | None = None,
+    ) -> str:
+        raise NoLLMConfiguredError(
+            "No language model is configured. Set LLM_* in the environment or define llm_chain in config.yaml."
+        )
+
+
 @dataclass
 class LLMClient:
     base_url: str
@@ -231,10 +247,24 @@ class LLMClient:
         finally:
             self._sdk_client = None
 
-    async def complete(self, *, system: str, user: str, _skip_success_log: bool = False) -> str:
+    async def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        model_override: str | None = None,
+        on_chain_skip: ChainSkipCallback | None = None,
+        start_provider: str | None = None,
+        _skip_success_log: bool = False,
+    ) -> str:
+        m = self.model
+        if model_override is not None:
+            o = model_override.strip()
+            if o:
+                m = o
         client = self._sdk()
         resp = await client.chat.completions.create(
-            model=self.model,
+            model=m,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -245,7 +275,7 @@ class LLMClient:
         if not _skip_success_log:
             logger.info(
                 "LLM OK | backend=single | model=%r | endpoint=%s | response_chars=%s",
-                self.model,
+                m,
                 format_llm_endpoint(self.base_url),
                 len(out),
             )
@@ -258,6 +288,7 @@ class LLMChainClient:
 
     _clients: tuple[LLMClient, ...]
     _names: tuple[str | None, ...]
+    _models: tuple[tuple[str, ...], ...]
 
     @classmethod
     def from_resolved(cls, entries: tuple[LLMProviderResolved, ...]) -> LLMChainClient:
@@ -274,7 +305,31 @@ class LLMChainClient:
             for e in entries
         )
         names = tuple(e.name for e in entries)
-        return cls(_clients=clients, _names=names)
+        models = tuple(e.models for e in entries)
+        return cls(_clients=clients, _names=names, _models=models)
+
+    def _resolve_start_index(self, start_provider: str | None) -> int:
+        n = len(self._clients)
+        if start_provider is None or not str(start_provider).strip():
+            return 0
+        s = str(start_provider).strip()
+        if s.isdigit():
+            i = int(s)
+            if 0 <= i < n:
+                return i
+            raise ValueError(f"Invalid llm_chain slot {s!r} (valid: 0..{n - 1}).")
+        for i, nm in enumerate(self._names):
+            if nm and nm.strip() == s:
+                return i
+        raise ValueError(f"Unknown LLM provider {s!r}.")
+
+    @staticmethod
+    def _visit_order(n: int, start_idx: int) -> list[int]:
+        order = [start_idx]
+        for j in range(n):
+            if j != start_idx:
+                order.append(j)
+        return order
 
     @property
     def model(self) -> str:
@@ -286,18 +341,37 @@ class LLMChainClient:
         system: str,
         user: str,
         on_chain_skip: ChainSkipCallback | None = None,
+        start_provider: str | None = None,
+        model_override: str | None = None,
     ) -> str:
         last_exc: BaseException | None = None
         n = len(self._clients)
-        for i, client in enumerate(self._clients):
+        start_idx = self._resolve_start_index(start_provider)
+        allowed_first = self._models[start_idx]
+        eff_override = model_override.strip() if model_override else None
+        if eff_override is not None and eff_override not in allowed_first:
+            raise ValueError(
+                f"Model {eff_override!r} is not configured for the selected provider. "
+                f"Configured: {', '.join(allowed_first)}."
+            )
+        order = self._visit_order(n, start_idx)
+        for step, i in enumerate(order):
+            client = self._clients[i]
             tag = self._names[i] or f"[{i}]"
             endpoint = format_llm_endpoint(client.base_url)
+            use_override = eff_override if step == 0 else None
             try:
-                out = await client.complete(system=system, user=user, _skip_success_log=True)
+                out = await client.complete(
+                    system=system,
+                    user=user,
+                    model_override=use_override,
+                    _skip_success_log=True,
+                )
+                used_model = use_override if use_override else client.model
                 logger.info(
                     "LLM OK | backend=chain | chain_entry=%r | model=%r | endpoint=%s | response_chars=%s",
                     tag,
-                    client.model,
+                    used_model,
                     endpoint,
                     len(out),
                 )
@@ -324,7 +398,8 @@ class LLMChainClient:
                         client.model,
                         endpoint,
                     )
-                if i + 1 >= n:
+                pos = order.index(i)
+                if pos + 1 >= n:
                     logger.error(
                         "LLM FAIL | backend=chain | chain_entry=%r | model=%r | endpoint=%s | %s | exc=%s: %s",
                         tag,
@@ -335,8 +410,9 @@ class LLMChainClient:
                         safe_exc_message(e),
                     )
                     raise LLMChainExhaustedError(provider_count=n, last_error=e) from e
-                next_client = self._clients[i + 1]
-                next_tag = self._names[i + 1] or f"[{i + 1}]"
+                next_i = order[pos + 1]
+                next_client = self._clients[next_i]
+                next_tag = self._names[next_i] or f"[{next_i}]"
                 next_ep = format_llm_endpoint(next_client.base_url)
                 if on_chain_skip is not None:
                     try:

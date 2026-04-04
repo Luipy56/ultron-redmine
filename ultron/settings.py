@@ -7,6 +7,10 @@ from pathlib import Path
 # Default HTTP read timeout for LLM calls (15 min). Override with LLM_TIMEOUT_SECONDS.
 _DEFAULT_LLM_TIMEOUT_SECONDS = 900.0
 
+# When ``DISCORD_GUILD_ID`` is unset or empty, slash commands sync to this guild (immediate updates).
+# Set ``DISCORD_GUILD_ID=0`` or ``global`` to use Discord global command sync instead (~1 h propagation).
+_DEFAULT_DISCORD_GUILD_SLASH_SYNC_ID = 788074756044750891
+
 # Placeholder when config.yaml defines llm_chain (real keys come from api_key_env entries).
 _LLM_CHAIN_PLACEHOLDER_KEY = "__llm_chain__"
 
@@ -53,6 +57,16 @@ def _opt_int(name: str) -> int | None:
     if not v:
         return None
     return int(v)
+
+
+def _discord_guild_id_for_slash_sync() -> int | None:
+    """``DISCORD_GUILD_ID``: unset → team default guild; ``0`` / ``global`` → None (global sync)."""
+    raw = os.environ.get("DISCORD_GUILD_ID", "").strip().lower()
+    if not raw:
+        return _DEFAULT_DISCORD_GUILD_SLASH_SYNC_ID
+    if raw in ("0", "global"):
+        return None
+    return int(raw)
 
 
 def _opt_float(name: str) -> float | None:
@@ -179,7 +193,7 @@ def load_env() -> EnvSettings:
 
     return EnvSettings(
         discord_token=token,
-        discord_guild_id=_opt_int("DISCORD_GUILD_ID"),
+        discord_guild_id=_discord_guild_id_for_slash_sync(),
         discord_application_id=_opt_int("DISCORD_APPLICATION_ID"),
         redmine_url=redmine_url,
         redmine_api_key=redmine_key,

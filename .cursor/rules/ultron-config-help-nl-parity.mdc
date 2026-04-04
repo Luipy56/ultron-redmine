@@ -1,0 +1,27 @@
+---
+description: When changing config or Discord commands, sync config.example, /help text, and NL router
+globs: config.example.yaml,config.yaml,ultron/config.py,ultron/bot.py,ultron/nl_router.py
+alwaysApply: false
+---
+
+# Ultron: config.example, help, and natural-language router
+
+## 1. Configuration and `config.example.yaml`
+
+When the schema or meaning of settings changes (`ultron/config.py` and/or YAML), update **`config.example.yaml`** in the same change. **English** comments only: explain the key (purpose, empty/null defaults), then a line **`# Example: …`** with a sample value.
+
+```yaml
+# my_setting — What it does; null uses built-in default.
+# Example: true
+my_setting: null
+```
+
+Do not leave the committed example template out of date when the schema changes.
+
+## 2. Slash commands and `/help`
+
+When you add or edit a slash command, update **`_HELP_TEXT`** in `ultron/bot.py` (used by **`/help`**) and each `@self.tree.command(..., description=...)`. Full checklist: **`.cursor/rules/ultron-slash-commands.mdc`**.
+
+## 3. Natural-language @mention routing
+
+If a command is (or stops being) reachable from chat, sync **`ultron/nl_router.py`**: `NL_ALLOWED_COMMANDS`, `NL_FORBIDDEN_COMMANDS`, `NL_ROUTER_SYSTEM` (allowed names/args must match code), and **`_validate_args`**. In **`ultron/bot.py`**: **`_nl_dispatch_status_line`** and **`_run_nl_invoke`**. Admin/token commands stay forbidden in sets and in the "NEVER output …" line in `NL_ROUTER_SYSTEM`.

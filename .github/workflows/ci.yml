@@ -27,11 +27,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Docker build
-        run: docker build -t ultron-ci .
-
-      - name: Smoke import (image)
-        run: docker run --rm ultron-ci python -c "from ultron.config import load_config; print('ok')"
+      - name: Docker Compose build and smoke
+        run: |
+          set -eux
+          docker compose -f docker-compose.ci.yml config -q
+          docker compose -f docker-compose.ci.yml build
+          docker compose -f docker-compose.ci.yml run --rm --no-deps ultron python -c \
+            "from pathlib import Path; from ultron.config import load_config; load_config(Path('config.yaml')); print('ok')"
 
   deploy:
     runs-on: ubuntu-latest

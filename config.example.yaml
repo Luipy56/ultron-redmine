@@ -10,6 +10,10 @@ discord:
   # Example: true
   ephemeral_default: null
 
+  # issue_metadata_header — If true, /summary and /ask_issue prepend one line (journal note count, total spent hours, last updated) before the model text; the same line is included in the ticket payload sent to the LLM. Null uses default true.
+  # Example: true
+  issue_metadata_header: null
+
   # summary_status_redmine — Shown while fetching the ticket from Redmine for /summary and /ask_issue. Empty uses built-in default text.
   # Example: "Fetching ticket from Redmine…"
   summary_status_redmine: ""
@@ -30,8 +34,12 @@ discord:
   # Example: true
   nl_commands: null
 
+  # slash_show_llm_option_hints — If true, richer llm_provider autocomplete (endpoint when multiple chain slots; no duplicate model name there) and short llm_model option text pointing to autocomplete + llm_chain. Null uses default false.
+  # Example: true
+  slash_show_llm_option_hints: null
+
   new_issues:
-    # status_name — Exact Redmine issue status name for /new_issues (Administration → Issue statuses). Empty means not configured for listing.
+    # status_name — Exact Redmine issue status name for /list_new_issues (Administration → Issue statuses). Empty means not configured for listing.
     # Example: New
     status_name: ""
 
@@ -62,7 +70,7 @@ discord:
       whitelist_events: null
 
   unassigned_open:
-    # min_age_days — For /unassigned_issues: only issues created at least this many days ago.
+    # min_age_days — For /list_unassigned_issues: only issues created at least this many days ago.
     # Example: 1
     min_age_days: null
 
@@ -75,56 +83,38 @@ discord:
     closed_status_prefixes: []
 
 reports:
-  # channel_id — Discord channel for scheduled abandoned / stale-new reports; 0 disables posting.
-  # Example: 1234567890123456789
+  # channel_id — Discord channel for scheduled listing posts and the startup summary; 0 disables.
+  # Example: 1489308369259991202
   channel_id: 0
 
-schedules:
-  abandoned:
-    # enabled — Periodically post a report of open tickets not updated recently.
-    # Example: true
-    enabled: null
+  # startup_message_enabled — If true, post a welcome + schedule summary when the bot becomes ready (same channel).
+  # Example: true
+  startup_message_enabled: null
 
-    # interval_hours — How often the job runs.
-    # Example: 24
-    interval_hours: null
+  # startup_welcome — First line of that post; empty uses a built-in English greeting.
+  # Example: "Hello team — automated Redmine digests below."
+  startup_welcome: ""
 
-    # max_days_without_update — Tickets older than this (by updated_on) are candidates.
-    # Example: 14
-    max_days_without_update: null
-
-    # max_issues — Upper bound on issues considered per run.
-    # Example: 50
-    max_issues: null
-
-  stale_new:
-    # enabled — Periodically post “stale new” ticket candidates.
-    # Example: true
-    enabled: null
-
-    # interval_hours — How often the job runs.
-    # Example: 24
-    interval_hours: null
-
-    # min_age_hours — Minimum issue age to qualify.
-    # Example: 2
-    min_age_hours: null
-
-    # require_unassigned — If true, only unassigned issues count.
-    # Example: true
-    require_unassigned: null
-
-    # max_journal_entries — At most this many journal entries (rough “staleness” filter).
-    # Example: 1
-    max_journal_entries: null
-
-    # max_issues — Upper bound per run.
-    # Example: 50
-    max_issues: null
-
-    # issue_status_name — If set, restrict to issues whose Redmine status name matches (case-insensitive). Null/empty means all open issues.
-    # Example: New
-    issue_status_name: null
+# report_schedule — Ordered jobs: run slash-equivalent listing commands on an interval (hours or interval_days).
+# command — list_new_issues | list_unassigned_issues | issues_by_status (issues_by_status requires args.status).
+# list_new_issues / list_unassigned_issues use discord.new_issues / discord.unassigned_open (no args).
+# Legacy aliases: new_issues → list_new_issues; unassigned_issues → list_unassigned_issues.
+# Example: list_new_issues and list_unassigned_issues each every 8h
+report_schedule: []
+# report_schedule:
+#   - enabled: true
+#     command: list_new_issues
+#     interval_hours: 8
+#     args: {}
+#   - enabled: true
+#     command: list_unassigned_issues
+#     interval_hours: 8
+#     args: {}
+#   - enabled: true
+#     command: issues_by_status
+#     interval_hours: 12
+#     args:
+#       status: "In Progress"
 
 logging:
   # log_read_messages — If true, log full prompts and ticket text (may contain secrets); use only for debugging.
@@ -133,6 +123,7 @@ logging:
 
 # llm_chain — Ordered providers: index 0 is primary, then fallbacks. Empty list [] means use LLM_* variables from .env instead.
 # Each entry needs base_url, model, api_key_env; optional name, enabled, timeout_seconds, max_retries.
+# model — Single string or ordered list of strings; first is the default model for that provider (slash / autocomplete can pick others when multiple).
 llm_chain: []
 
 # Example chain (uncomment and set api_key_env to real env var names holding keys):
@@ -140,7 +131,7 @@ llm_chain: []
 #   - name: "local-ollama"
 #     enabled: true
 #     base_url: "http://127.0.0.1:11434/v1"
-#     model: "llama3.2"
+#     model: ["llama3.2", "mistral"]
 #     api_key_env: "OLLAMA_API_KEY"
 #     timeout_seconds: 900
 #     max_retries: 0

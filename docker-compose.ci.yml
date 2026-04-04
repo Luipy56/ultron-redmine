@@ -1,0 +1,17 @@
+# CI-only: smoke test without touching a developer's `.env` in the repo root.
+# Local dev remains `docker compose up` with `docker-compose.yml`.
+services:
+  ultron:
+    build: .
+    working_dir: /app
+    env_file:
+      - .env.example
+    environment:
+      CONFIG_PATH: config.yaml
+      ULTRON_STATE_DIR: /app/data
+    volumes:
+      - ./config.example.yaml:/app/config.yaml:ro
+      - ultron_ci_data:/app/data
+
+volumes:
+  ultron_ci_data:

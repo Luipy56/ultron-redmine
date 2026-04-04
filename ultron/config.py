@@ -25,7 +25,7 @@ _DEFAULT_LLM_CHAIN_MAX_RETRIES = 2
 
 @dataclass
 class NewIssuesSlashConfig:
-    """`/new_issues`: list issues whose status name matches Redmine, created ≥ `min_age_days` ago."""
+    """`/list_new_issues`: list issues whose status name matches Redmine, created ≥ `min_age_days` ago."""
 
     status_name: str = ""
     list_limit: int = 20
@@ -51,7 +51,7 @@ class RegistrationLogConfig:
 
 @dataclass
 class UnassignedOpenConfig:
-    """`/unassigned_issues`: unassigned + Redmine-open issues, created ≥ ``min_age_days`` ago, excluding status prefixes."""
+    """`/list_unassigned_issues`: unassigned + Redmine-open issues, created ≥ ``min_age_days`` ago, excluding status prefixes."""
 
     min_age_days: int = 1
     list_limit: int = 20
@@ -61,12 +61,16 @@ class UnassignedOpenConfig:
 @dataclass
 class DiscordConfig:
     ephemeral_default: bool = True
+    #: When True (default), prepend note count, logged hours, and last update to `/summary` and `/ask_issue` replies.
+    issue_metadata_header: bool = True
     summary_status_redmine: str = _DEFAULT_SUMMARY_STATUS_REDMINE
     summary_status_llm: str = _DEFAULT_SUMMARY_STATUS_LLM
     llm_chain_skip_status: str = _DEFAULT_LLM_CHAIN_SKIP_STATUS
     llm_chain_all_failed_message: str = _DEFAULT_LLM_CHAIN_ALL_FAILED
     #: When True (default), @mention / reply uses an LLM router. Set ``false`` for a fixed short greeting only.
     nl_commands: bool = True
+    #: When True, slash option descriptions and autocomplete emphasize configured LLM / model names.
+    slash_show_llm_option_hints: bool = False
     new_issues: NewIssuesSlashConfig = field(default_factory=NewIssuesSlashConfig)
     registration_log: RegistrationLogConfig = field(default_factory=RegistrationLogConfig)
     unassigned_open: UnassignedOpenConfig = field(default_factory=UnassignedOpenConfig)
@@ -75,33 +79,19 @@ class DiscordConfig:
 @dataclass
 class ReportsConfig:
     channel_id: int = 0
+    #: Post a welcome + schedule summary to ``channel_id`` when the bot becomes ready.
+    startup_message_enabled: bool = True
+    #: First line of the startup post; empty uses a built-in English greeting.
+    startup_welcome: str = ""
 
 
-@dataclass
-class AbandonedSchedule:
-    enabled: bool = True
-    interval_hours: int = 24
-    max_days_without_update: int = 14
-    max_issues: int = 50
+@dataclass(frozen=True)
+class ReportScheduleEntry:
+    """One enabled row from YAML ``report_schedule`` (disabled rows are omitted at load time)."""
 
-
-@dataclass
-class StaleNewSchedule:
-    enabled: bool = True
-    interval_hours: int = 24
-    min_age_hours: int = 2
-    require_unassigned: bool = True
-    max_journal_entries: int = 1
-    max_issues: int = 50
-    #: If set, only issues whose current Redmine **status name** matches (see Administration → Issue statuses).
-    #: Empty / omitted = all **open** issues (Redmine ``status_id=open``). Matching is case-insensitive.
-    issue_status_name: str | None = None
-
-
-@dataclass
-class SchedulesConfig:
-    abandoned: AbandonedSchedule
-    stale_new: StaleNewSchedule
+    command: str
+    interval_hours: int
+    args: tuple[tuple[str, str], ...]
 
 
 @dataclass
@@ -114,12 +104,17 @@ class LLMProviderSpec:
     """One YAML `llm_chain` list item (order = priority). Keys come from `api_key_env`."""
 
     base_url: str
-    model: str
+    models: tuple[str, ...]
     api_key_env: str
     timeout_seconds: float
     max_retries: int
     name: str | None = None
     enabled: bool = True
+
+    @property
+    def model(self) -> str:
+        """Primary model (first entry in YAML ``model`` list)."""
+        return self.models[0]
 
 
 @dataclass(frozen=True)
@@ -127,11 +122,15 @@ class LLMProviderResolved:
     """Resolved list item (API key loaded); used to build SDK clients."""
 
     base_url: str
-    model: str
+    models: tuple[str, ...]
     api_key: str
     timeout_seconds: float
     max_retries: int
     name: str | None = None
+
+    @property
+    def model(self) -> str:
+        return self.models[0]
 
 
 @dataclass
@@ -139,7 +138,7 @@ class AppConfig:
     timezone: str
     discord: DiscordConfig
     reports: ReportsConfig
-    schedules: SchedulesConfig
+    report_schedule: tuple[ReportScheduleEntry, ...]
     logging: LoggingConfig
     llm_chain: tuple[LLMProviderSpec, ...] | None = None
 
@@ -169,6 +168,82 @@ def _str(v: Any, default: str) -> str:
     return s if s else default
 
 
+def _parse_model_yaml(raw: Any, *, entry_index: int) -> tuple[str, ...]:
+    """YAML ``model``: non-empty string or non-empty list of strings (first = primary)."""
+    if raw is None:
+        raise ValueError(f"llm_chain[{entry_index}].model is required")
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            raise ValueError(f"llm_chain[{entry_index}].model must be non-empty")
+        return (s,)
+    if isinstance(raw, list):
+        out: list[str] = []
+        for j, item in enumerate(raw):
+            t = str(item).strip()
+            if not t:
+                raise ValueError(f"llm_chain[{entry_index}].model[{j}] must be non-empty")
+            out.append(t)
+        if not out:
+            raise ValueError(f"llm_chain[{entry_index}].model list must be non-empty")
+        return tuple(out)
+    raise ValueError(
+        f"llm_chain[{entry_index}].model must be a non-empty string or a non-empty list of strings"
+    )
+
+
+def llm_chain_slash_flags(specs: tuple[LLMProviderSpec, ...] | None) -> tuple[bool, bool]:
+    """Whether slash commands register optional ``llm_provider`` / ``llm_model`` (at Discord sync time).
+
+    When ``llm_chain`` is non-empty, both options are always registered so ``/summary``, ``/ask_issue``,
+    and ``/note`` match the documented shape; autocomplete lists configured slots and models. Users may
+    leave either option empty to use chain defaults (first slot, primary model per slot).
+    """
+    if not specs:
+        return False, False
+    return True, True
+
+
+def llm_chain_resolve_start_index(specs: tuple[LLMProviderSpec, ...], provider: str | None) -> int:
+    """Resolve Discord provider token to chain index (0..n-1). Empty / None → 0."""
+    n = len(specs)
+    if n == 0:
+        return 0
+    if provider is None or not str(provider).strip():
+        return 0
+    s = str(provider).strip()
+    if s.isdigit():
+        i = int(s)
+        if 0 <= i < n:
+            return i
+        raise ValueError(f"Invalid llm_chain slot {s!r} (valid: 0..{n - 1}).")
+    for i, spec in enumerate(specs):
+        if spec.name and spec.name.strip() == s:
+            return i
+    raise ValueError(f"Unknown LLM provider {s!r}.")
+
+
+def llm_chain_slash_model_override(
+    specs: tuple[LLMProviderSpec, ...],
+    start_idx: int,
+    model: str | None,
+    *,
+    command_includes_model_option: bool,
+) -> tuple[str | None, str]:
+    """Return (API model override or None for primary, display name)."""
+    allowed = specs[start_idx].models
+    if not command_includes_model_option or len(allowed) == 1:
+        return None, allowed[0]
+    choice = (model or "").strip()
+    if not choice:
+        return None, allowed[0]
+    if choice not in allowed:
+        raise ValueError(
+            f"Unknown model {choice!r} for this provider. Configured: {', '.join(allowed)}."
+        )
+    return (None if choice == allowed[0] else choice), choice
+
+
 def _parse_llm_chain(raw: Any) -> tuple[LLMProviderSpec, ...] | None:
     if raw is None:
         return None
@@ -190,9 +265,7 @@ def _parse_llm_chain(raw: Any) -> tuple[LLMProviderSpec, ...] | None:
             raise ValueError(
                 f"llm_chain[{i}].base_url must be an http(s) URL with a host (got {base_url!r})"
             )
-        model = _str(item.get("model"), "").strip()
-        if not model:
-            raise ValueError(f"llm_chain[{i}].model is required")
+        models = _parse_model_yaml(item.get("model"), entry_index=i)
         api_key_env = _str(item.get("api_key_env"), "").strip()
         if not api_key_env:
             raise ValueError(f"llm_chain[{i}].api_key_env is required")
@@ -211,7 +284,7 @@ def _parse_llm_chain(raw: Any) -> tuple[LLMProviderSpec, ...] | None:
         out.append(
             LLMProviderSpec(
                 base_url=base_url,
-                model=model,
+                models=models,
                 api_key_env=api_key_env,
                 timeout_seconds=timeout_seconds,
                 max_retries=max_retries,
@@ -238,7 +311,7 @@ def resolve_llm_chain(specs: tuple[LLMProviderSpec, ...]) -> tuple[LLMProviderRe
         resolved.append(
             LLMProviderResolved(
                 base_url=s.base_url,
-                model=s.model,
+                models=s.models,
                 api_key=key,
                 timeout_seconds=s.timeout_seconds,
                 max_retries=s.max_retries,
@@ -246,6 +319,57 @@ def resolve_llm_chain(specs: tuple[LLMProviderSpec, ...]) -> tuple[LLMProviderRe
             )
         )
     return tuple(resolved)
+
+
+_REPORT_SCHEDULE_COMMANDS = frozenset({"list_new_issues", "list_unassigned_issues", "issues_by_status"})
+
+
+def _parse_report_schedule(raw: Any) -> tuple[ReportScheduleEntry, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError("report_schedule must be a list")
+    out: list[ReportScheduleEntry] = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"report_schedule[{i}] must be a mapping")
+        if not _bool(item.get("enabled"), True):
+            continue
+        cmd = _str(item.get("command"), "").strip()
+        if cmd == "new_issues":
+            cmd = "list_new_issues"
+        if cmd == "unassigned_issues":
+            cmd = "list_unassigned_issues"
+        if cmd not in _REPORT_SCHEDULE_COMMANDS:
+            raise ValueError(
+                f"report_schedule[{i}].command must be one of {sorted(_REPORT_SCHEDULE_COMMANDS)!r}, got {cmd!r}"
+            )
+        interval_hours = _int(item.get("interval_hours"), 0)
+        idays = item.get("interval_days")
+        if idays is not None:
+            interval_hours = max(1, _int(idays, 0) * 24)
+        if interval_hours < 1:
+            raise ValueError(
+                f"report_schedule[{i}] needs interval_hours >= 1 or interval_days >= 1 (got interval_hours={interval_hours!r})"
+            )
+        args_raw = item.get("args")
+        if args_raw is None:
+            args_raw = {}
+        if not isinstance(args_raw, dict):
+            raise ValueError(f"report_schedule[{i}].args must be a mapping")
+        args_pairs = tuple((str(k), str(v)) for k, v in args_raw.items())
+        if cmd in ("list_new_issues", "list_unassigned_issues") and args_pairs:
+            raise ValueError(
+                f"report_schedule[{i}].command {cmd!r} does not use args; configure discord.new_issues / "
+                "discord.unassigned_open instead"
+            )
+        if cmd == "issues_by_status":
+            ad = dict(args_pairs)
+            st = str(ad.get("status", "")).strip()
+            if not st:
+                raise ValueError(f"report_schedule[{i}].args.status is required for issues_by_status")
+        out.append(ReportScheduleEntry(command=cmd, interval_hours=interval_hours, args=args_pairs))
+    return tuple(out)
 
 
 def load_config(path: Path) -> AppConfig:
@@ -287,6 +411,7 @@ def load_config(path: Path) -> AppConfig:
     )
     discord_cfg = DiscordConfig(
         ephemeral_default=_bool(d_raw.get("ephemeral_default"), True),
+        issue_metadata_header=_bool(d_raw.get("issue_metadata_header"), True),
         summary_status_redmine=_str(d_raw.get("summary_status_redmine"), _DEFAULT_SUMMARY_STATUS_REDMINE),
         summary_status_llm=_str(d_raw.get("summary_status_llm"), _DEFAULT_SUMMARY_STATUS_LLM),
         llm_chain_skip_status=_str(d_raw.get("llm_chain_skip_status"), _DEFAULT_LLM_CHAIN_SKIP_STATUS),
@@ -294,39 +419,20 @@ def load_config(path: Path) -> AppConfig:
             d_raw.get("llm_chain_all_failed_message"), _DEFAULT_LLM_CHAIN_ALL_FAILED
         ),
         nl_commands=_bool(d_raw.get("nl_commands"), True),
+        slash_show_llm_option_hints=_bool(d_raw.get("slash_show_llm_option_hints"), False),
         new_issues=new_issues_cfg,
         registration_log=registration_log_cfg,
         unassigned_open=unassigned_open_cfg,
     )
 
     r_raw = raw.get("reports") or {}
-    reports_cfg = ReportsConfig(channel_id=_int(r_raw.get("channel_id"), 0))
-
-    s_raw = raw.get("schedules") or {}
-    ab = s_raw.get("abandoned") or {}
-    sn = s_raw.get("stale_new") or {}
-
-    abandoned = AbandonedSchedule(
-        enabled=_bool(ab.get("enabled"), True),
-        interval_hours=_int(ab.get("interval_hours"), 24),
-        max_days_without_update=_int(ab.get("max_days_without_update"), 14),
-        max_issues=_int(ab.get("max_issues"), 50),
+    reports_cfg = ReportsConfig(
+        channel_id=_int(r_raw.get("channel_id"), 0),
+        startup_message_enabled=_bool(r_raw.get("startup_message_enabled"), True),
+        startup_welcome=_str(r_raw.get("startup_welcome"), ""),
     )
-    isn_raw = sn.get("issue_status_name")
-    if isn_raw is None or (isinstance(isn_raw, str) and not isn_raw.strip()):
-        issue_status_name: str | None = None
-    else:
-        issue_status_name = str(isn_raw).strip()
 
-    stale_new = StaleNewSchedule(
-        enabled=_bool(sn.get("enabled"), True),
-        interval_hours=_int(sn.get("interval_hours"), 24),
-        min_age_hours=_int(sn.get("min_age_hours"), 2),
-        require_unassigned=_bool(sn.get("require_unassigned"), True),
-        max_journal_entries=_int(sn.get("max_journal_entries"), 1),
-        max_issues=_int(sn.get("max_issues"), 50),
-        issue_status_name=issue_status_name,
-    )
+    report_schedule = _parse_report_schedule(raw.get("report_schedule"))
 
     l_raw = raw.get("logging") or {}
     logging_cfg = LoggingConfig(log_read_messages=_bool(l_raw.get("log_read_messages"), False))
@@ -337,7 +443,7 @@ def load_config(path: Path) -> AppConfig:
         timezone=tz,
         discord=discord_cfg,
         reports=reports_cfg,
-        schedules=SchedulesConfig(abandoned=abandoned, stale_new=stale_new),
+        report_schedule=report_schedule,
         logging=logging_cfg,
         llm_chain=llm_chain,
     )

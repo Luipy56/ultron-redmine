@@ -159,7 +159,8 @@ def section_discord_server(q: Any, state: WizardState) -> None:
     print("\n--- Discord server & channels ---\n")
     gid = state.env_get("DISCORD_GUILD_ID")
     print(
-        "DISCORD_GUILD_ID: optional; if set, slash commands sync to this guild immediately.\n"
+        "DISCORD_GUILD_ID: optional; if unset, slash commands default to guild 788074756044750891; "
+        "set another id, or 0 / global for global sync.\n"
         f"Current: {gid or '(empty)'}\n"
     )
     if _yn(q, "Edit guild (server) ID?", default=False):
@@ -190,13 +191,23 @@ def section_discord_server(q: Any, state: WizardState) -> None:
         feat["startup"] = _yn(q, "Log bot startup to this channel?", default=True)
         feat["whitelist_events"] = _yn(q, "Log /token and /approve to this channel?", default=True)
 
-    print(f"\nScheduled reports channel (reports.channel_id): {_dig(y, 'reports', 'channel_id')}\n")
+    print(f"\nReports channel (reports.channel_id): {_dig(y, 'reports', 'channel_id')}\n")
     if _yn(q, "Edit reports.channel_id?", default=False):
         cid = _text(q, "reports.channel_id (integer, 0 = disabled)", default=str(_dig(y, "reports", "channel_id") or "0")).strip()
         try:
             rep["channel_id"] = int(cid) if cid else 0
         except ValueError:
             print("Invalid channel_id; skipped.")
+    rep.setdefault("startup_message_enabled", True)
+    print(f"reports.startup_message_enabled: {rep.get('startup_message_enabled')}\n")
+    if _yn(q, "Toggle reports.startup_message_enabled (welcome post when bot connects)?", default=False):
+        rep["startup_message_enabled"] = _yn(q, "Post startup summary to reports channel?", default=bool(rep.get("startup_message_enabled", True)))
+    if _yn(q, "Edit reports.startup_welcome (first line; empty = default text)?", default=False):
+        rep["startup_welcome"] = _text(
+            q,
+            "startup_welcome (optional)",
+            default=str(rep.get("startup_welcome") or ""),
+        ).strip()
 
 
 def section_admins(q: Any, state: WizardState) -> None:
@@ -239,7 +250,10 @@ def section_llm(q: Any, state: WizardState) -> None:
     print("\n--- Language model (.env + llm_chain) ---\n")
     print(
         "Ultron can run without an LLM (omit API key and llm_chain) or use a single provider from .env "
-        "or an ordered llm_chain in config.yaml.\n"
+        "or an ordered llm_chain in config.yaml. Each chain entry can list multiple models (YAML string or "
+        "list); the first is the default; /summary /ask_issue /note always list optional llm_provider and "
+        "llm_model when llm_chain is set (richer provider autocomplete and short model hint text when "
+        "discord.slash_show_llm_option_hints is true).\n"
     )
     dis = state.env_get("LLM_DISABLED") or state.env_get("ULTRON_NO_LLM")
     print(f"LLM_DISABLED / ULTRON_NO_LLM: {dis or '(unset)'}\n")
@@ -294,11 +308,23 @@ def section_llm(q: Any, state: WizardState) -> None:
     if choice == llm_opts[1]:
         y["llm_chain"] = []
     elif choice == llm_opts[2]:
+        model_raw = _text(
+            q,
+            "model(s) — one id, or comma-separated (first = primary / default)",
+            default="",
+        ).strip()
+        model_parts = [p.strip() for p in model_raw.split(",") if p.strip()]
+        if len(model_parts) == 1:
+            model_yaml: str | list[str] = model_parts[0]
+        elif len(model_parts) > 1:
+            model_yaml = model_parts
+        else:
+            model_yaml = ""
         entry = {
             "name": _text(q, "Optional name", default="").strip() or None,
             "enabled": True,
             "base_url": _text(q, "base_url (http(s) ... /v1)", default="").strip(),
-            "model": _text(q, "model", default="").strip(),
+            "model": model_yaml,
             "api_key_env": _text(q, "api_key_env (env var name holding the API key)", default="OPENAI_API_KEY").strip(),
             "timeout_seconds": None,
             "max_retries": None,
@@ -318,7 +344,7 @@ def section_llm(q: Any, state: WizardState) -> None:
 
 def section_yaml_behavior(q: Any, state: WizardState) -> None:
     state.ensure_yaml()
-    print("\n--- YAML: timezone, slash behavior, schedules ---\n")
+    print("\n--- YAML: timezone, Discord behavior, schedules ---\n")
     y = state.yaml_data
     tz = str(y.get("timezone") or "")
     if _yn(q, f"Edit timezone? (current: {tz or 'default UTC'})", default=False):
@@ -327,6 +353,38 @@ def section_yaml_behavior(q: Any, state: WizardState) -> None:
     d = _ensure_nested(y, "discord")
     if _yn(q, "Edit discord.ephemeral_default?", default=False):
         d["ephemeral_default"] = _yn(q, "Ephemeral slash replies by default?", default=True)
+
+    imh_cur = d.get("issue_metadata_header")
+    if imh_cur is None:
+        imh_desc = "null (runtime default: true)"
+        imh_default_yn = True
+    else:
+        imh_desc = repr(imh_cur)
+        imh_default_yn = bool(imh_cur)
+    print(
+        "discord.issue_metadata_header — Prepend journal note count, spent hours, and last update to "
+        "/summary and /ask_issue (and include the same line in the LLM ticket payload).\n"
+        f"  Current YAML value: {imh_desc}\n"
+    )
+    if _yn(q, "Edit discord.issue_metadata_header?", default=False):
+        d["issue_metadata_header"] = _yn(q, "Enable issue metadata header?", default=imh_default_yn)
+
+    ssh_cur = d.get("slash_show_llm_option_hints")
+    if ssh_cur is None:
+        ssh_desc = "null (runtime default: false)"
+        ssh_default_yn = False
+    else:
+        ssh_desc = repr(ssh_cur)
+        ssh_default_yn = bool(ssh_cur)
+    print(
+        "discord.slash_show_llm_option_hints — Richer llm_provider autocomplete (endpoint when multiple "
+        "slots) and concise llm_model option text; model lists come from autocomplete, not the tooltip.\n"
+        f"  Current YAML value: {ssh_desc}\n"
+    )
+    if _yn(q, "Edit discord.slash_show_llm_option_hints?", default=False):
+        d["slash_show_llm_option_hints"] = _yn(
+            q, "Show LLM provider/model hints on slash commands?", default=ssh_default_yn
+        )
 
     nl_cur = d.get("nl_commands")
     if nl_cur is None:
@@ -344,7 +402,7 @@ def section_yaml_behavior(q: Any, state: WizardState) -> None:
 
     ni = _ensure_nested(d, "new_issues")
     print(f"new_issues: {ni}\n")
-    if _yn(q, "Edit /new_issues (status name, limits)?", default=False):
+    if _yn(q, "Edit /list_new_issues (status name, limits)?", default=False):
         ni["status_name"] = _text(q, "new_issues.status_name (exact Redmine status)", default=str(ni.get("status_name") or "")).strip()
         lim = _text(q, "new_issues.list_limit", default=str(ni.get("list_limit") or "20")).strip()
         age = _text(q, "new_issues.min_age_days", default=str(ni.get("min_age_days") or "2")).strip()
@@ -355,8 +413,8 @@ def section_yaml_behavior(q: Any, state: WizardState) -> None:
             print("Invalid integer; skipped.")
 
     uo = _ensure_nested(d, "unassigned_open")
-    print(f"unassigned_open (/unassigned_issues): {uo}\n")
-    if _yn(q, "Edit /unassigned_issues (unassigned_open: min age, list cap, closed status prefixes)?", default=False):
+    print(f"unassigned_open (/list_unassigned_issues): {uo}\n")
+    if _yn(q, "Edit /list_unassigned_issues (unassigned_open: min age, list cap, closed status prefixes)?", default=False):
         lim = _text(
             q,
             "unassigned_open.list_limit",
@@ -384,47 +442,24 @@ def section_yaml_behavior(q: Any, state: WizardState) -> None:
         ).strip()
         uo["closed_status_prefixes"] = [p.strip() for p in pref_raw.split(",") if p.strip()]
 
-    ab = _ensure_nested(y, "schedules", "abandoned")
-    print(f"schedules.abandoned: {ab}\n")
-    if _yn(q, "Edit schedules.abandoned?", default=False):
-        ab["enabled"] = _yn(q, "abandoned.enabled?", default=ab.get("enabled") is not False)
-        for fld, dv in (
-            ("interval_hours", "24"),
-            ("max_days_without_update", "14"),
-            ("max_issues", "50"),
-        ):
-            cur = str(ab.get(fld) if ab.get(fld) is not None else dv)
-            raw = _text(q, f"abandoned.{fld}", default=cur).strip()
-            if raw:
-                try:
-                    ab[fld] = int(raw)
-                except ValueError:
-                    print(f"Invalid {fld}; skipped.")
-
-    sn = _ensure_nested(y, "schedules", "stale_new")
-    print(f"schedules.stale_new: {sn}\n")
-    if _yn(q, "Edit schedules.stale_new?", default=False):
-        sn["enabled"] = _yn(q, "stale_new.enabled?", default=sn.get("enabled") is not False)
-        for fld, dv in (
-            ("interval_hours", "24"),
-            ("min_age_hours", "2"),
-            ("max_journal_entries", "1"),
-            ("max_issues", "50"),
-        ):
-            cur = str(sn.get(fld) if sn.get(fld) is not None else dv)
-            raw = _text(q, f"stale_new.{fld}", default=cur).strip()
-            if raw:
-                try:
-                    sn[fld] = int(raw)
-                except ValueError:
-                    print(f"Invalid {fld}; skipped.")
-        sn["require_unassigned"] = _yn(q, "stale_new.require_unassigned?", default=bool(sn.get("require_unassigned", True)))
-        stn = _text(
-            q,
-            "stale_new.issue_status_name (empty = all open issues)",
-            default=str(sn.get("issue_status_name") or ""),
-        ).strip()
-        sn["issue_status_name"] = stn or None
+    rs = y.get("report_schedule")
+    if not isinstance(rs, list):
+        rs = []
+        y["report_schedule"] = rs
+    print(f"report_schedule (scheduled channel commands): {rs}\n")
+    print(
+        "Each entry: enabled, command (list_new_issues | list_unassigned_issues | issues_by_status), "
+        "interval_hours or interval_days, args (issues_by_status needs args.status).\n"
+    )
+    if _yn(q, "Set report_schedule template (list_new_issues + list_unassigned_issues, each every 8h)?", default=False):
+        y["report_schedule"] = [
+            {"enabled": True, "command": "list_new_issues", "interval_hours": 8, "args": {}},
+            {"enabled": True, "command": "list_unassigned_issues", "interval_hours": 8, "args": {}},
+        ]
+        print("Updated report_schedule.\n")
+    if _yn(q, "Clear report_schedule (no scheduled channel jobs)?", default=False):
+        y["report_schedule"] = []
+        print("Cleared report_schedule.\n")
 
     log_cfg = _ensure_nested(y, "logging")
     if _yn(q, "Edit logging.log_read_messages (debug; may log secrets)?", default=False):

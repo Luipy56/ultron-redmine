@@ -12,9 +12,7 @@ def test_unassigned_open_defaults(tmp_path: Path) -> None:
 timezone: UTC
 discord: {}
 reports: {}
-schedules:
-  abandoned: {}
-  stale_new: {}
+report_schedule: []
 logging: {}
 llm_chain: []
 """,
@@ -40,9 +38,7 @@ discord:
       - Solved
       - "Comments"
 reports: {}
-schedules:
-  abandoned: {}
-  stale_new: {}
+report_schedule: []
 logging: {}
 llm_chain: []
 """,
