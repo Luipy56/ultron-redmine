@@ -209,6 +209,64 @@ class LLMProviderResolved:
 
 
 @dataclass
+class PiConfig:
+    """``/pi`` — pi.dev agent with Ollama (bot admins only)."""
+
+    #: ``false`` disables; ``null``/omitted enables when pi binary + Ollama ``llm_chain`` exist.
+    enabled: bool | None = None
+    #: Working directory for pi (default: Ultron checkout root).
+    workspace: str = ""
+    #: Override Ollama OpenAI base URL; empty uses the first Ollama-like ``llm_chain`` entry.
+    ollama_base_url: str = ""
+    #: Model id for pi; empty uses the primary model from that chain entry.
+    model: str = ""
+    provider: str = "ollama"
+    #: API key string passed to pi (local Ollama often uses the literal ``ollama``).
+    api_key: str = ""
+    timeout_seconds: float = 900.0
+    bin_path: str = ""
+    config_dir: str = ""
+    prompt_path: str = ""
+    tunnel_script: str = ""
+    ollama_connect_timeout_seconds: float = 5.0
+    ollama_connect_retries: int = 5
+    ollama_connect_retry_delay_seconds: float = 2.0
+
+
+@dataclass(frozen=True)
+class AmvaraAuditConfig:
+    prefer_agent: str = "pi"
+    fallback_enabled: bool = True
+    timeout_seconds: float = 900.0
+
+
+@dataclass(frozen=True)
+class AmvaraServerSpec:
+    name: str
+    ssh_target: str = ""
+    workspace: str = ""
+    description: str = ""
+
+
+@dataclass
+class AmvaraConfig:
+    local_host: str = "amvara4"
+    ssh_config_path: str = ""
+    merge_ssh_config: bool = True
+    allowed_hosts: tuple[str, ...] = ()
+    servers: tuple[AmvaraServerSpec, ...] = ()
+    audit: AmvaraAuditConfig = field(default_factory=AmvaraAuditConfig)
+
+
+@dataclass
+class CursorAgentConfig:
+    enabled: bool = True
+    bin_path: str = ""
+    timeout_seconds: float = 900.0
+    workspace: str = ""
+
+
+@dataclass
 class AppConfig:
     timezone: str
     discord: DiscordConfig
@@ -218,6 +276,9 @@ class AppConfig:
     redmine: RedmineConfig = field(default_factory=RedmineConfig)
     environment_bindings: EnvironmentBindings = field(default_factory=EnvironmentBindings)
     llm_chain: tuple[LLMProviderSpec, ...] | None = None
+    pi: PiConfig = field(default_factory=PiConfig)
+    amvara: AmvaraConfig = field(default_factory=AmvaraConfig)
+    cursor_agent: CursorAgentConfig = field(default_factory=CursorAgentConfig)
 
 
 def _bool(v: Any, default: bool) -> bool:
@@ -449,6 +510,83 @@ def _parse_report_schedule(raw: Any) -> tuple[ReportScheduleEntry, ...]:
     return tuple(out)
 
 
+def _parse_amvara_config(raw: Any) -> AmvaraConfig:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError("amvara must be a mapping")
+
+    allowed_raw = raw.get("allowed_hosts")
+    allowed: tuple[str, ...] = ()
+    if allowed_raw is not None:
+        if not isinstance(allowed_raw, list):
+            raise ValueError("amvara.allowed_hosts must be a list")
+        allowed = tuple(str(x).strip().casefold() for x in allowed_raw if str(x).strip())
+
+    servers_raw = raw.get("servers") or {}
+    servers: list[AmvaraServerSpec] = []
+    if servers_raw is not None:
+        if not isinstance(servers_raw, dict):
+            raise ValueError("amvara.servers must be a mapping")
+        for key, val in servers_raw.items():
+            name = str(key).strip().casefold()
+            if not name:
+                continue
+            if val is None:
+                val = {}
+            if not isinstance(val, dict):
+                raise ValueError(f"amvara.servers.{key} must be a mapping")
+            servers.append(
+                AmvaraServerSpec(
+                    name=name,
+                    ssh_target=_str(val.get("ssh_target"), ""),
+                    workspace=_str(val.get("workspace"), ""),
+                    description=_str(val.get("description"), ""),
+                )
+            )
+
+    audit_raw = raw.get("audit") or {}
+    if audit_raw is not None and not isinstance(audit_raw, dict):
+        raise ValueError("amvara.audit must be a mapping")
+    prefer = _str(audit_raw.get("prefer_agent"), "pi") if isinstance(audit_raw, dict) else "pi"
+    if prefer.casefold() not in ("pi", "ca"):
+        raise ValueError("amvara.audit.prefer_agent must be 'pi' or 'ca'")
+    timeout = _float(audit_raw.get("timeout_seconds") if isinstance(audit_raw, dict) else None, 900.0)
+    if timeout <= 0:
+        raise ValueError("amvara.audit.timeout_seconds must be positive")
+
+    return AmvaraConfig(
+        local_host=_str(raw.get("local_host"), "amvara4"),
+        ssh_config_path=_str(raw.get("ssh_config_path"), ""),
+        merge_ssh_config=_bool(raw.get("merge_ssh_config"), True),
+        allowed_hosts=allowed,
+        servers=tuple(servers),
+        audit=AmvaraAuditConfig(
+            prefer_agent=prefer,
+            fallback_enabled=_bool(audit_raw.get("fallback_enabled"), True)
+            if isinstance(audit_raw, dict)
+            else True,
+            timeout_seconds=timeout,
+        ),
+    )
+
+
+def _parse_cursor_agent_config(raw: Any) -> CursorAgentConfig:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError("cursor_agent must be a mapping")
+    timeout = _float(raw.get("timeout_seconds"), 900.0)
+    if timeout <= 0:
+        raise ValueError("cursor_agent.timeout_seconds must be positive")
+    return CursorAgentConfig(
+        enabled=_bool(raw.get("enabled"), True),
+        bin_path=_str(raw.get("bin_path"), ""),
+        timeout_seconds=timeout,
+        workspace=_str(raw.get("workspace"), ""),
+    )
+
+
 def load_config(path: Path) -> AppConfig:
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
@@ -541,6 +679,49 @@ def load_config(path: Path) -> AppConfig:
     tsm = max(50, min(5000, _int(rm_raw.get("time_summary_max_entries"), 2000)))
     redmine_cfg = RedmineConfig(user_id_by_login=uid_map, time_summary_max_entries=tsm)
 
+    pi_raw = raw.get("pi") or {}
+    if pi_raw is not None and not isinstance(pi_raw, dict):
+        raise ValueError("pi must be a mapping")
+    pi_enabled_raw = pi_raw.get("enabled") if isinstance(pi_raw, dict) else None
+    pi_enabled: bool | None
+    if pi_enabled_raw is None:
+        pi_enabled = None
+    else:
+        pi_enabled = bool(pi_enabled_raw)
+    pi_cfg = PiConfig(
+        enabled=pi_enabled,
+        workspace=_str(pi_raw.get("workspace"), "") if isinstance(pi_raw, dict) else "",
+        ollama_base_url=_str(pi_raw.get("ollama_base_url"), "") if isinstance(pi_raw, dict) else "",
+        model=_str(pi_raw.get("model"), "") if isinstance(pi_raw, dict) else "",
+        provider=_str(pi_raw.get("provider"), "ollama") if isinstance(pi_raw, dict) else "ollama",
+        api_key=_str(pi_raw.get("api_key"), "") if isinstance(pi_raw, dict) else "",
+        timeout_seconds=_float(
+            pi_raw.get("timeout_seconds") if isinstance(pi_raw, dict) else None,
+            900.0,
+        ),
+        bin_path=_str(pi_raw.get("bin_path"), "") if isinstance(pi_raw, dict) else "",
+        config_dir=_str(pi_raw.get("config_dir"), "") if isinstance(pi_raw, dict) else "",
+        prompt_path=_str(pi_raw.get("prompt_path"), "") if isinstance(pi_raw, dict) else "",
+        tunnel_script=_str(pi_raw.get("tunnel_script"), "") if isinstance(pi_raw, dict) else "",
+        ollama_connect_timeout_seconds=_float(
+            pi_raw.get("ollama_connect_timeout_seconds") if isinstance(pi_raw, dict) else None,
+            5.0,
+        ),
+        ollama_connect_retries=_int(
+            pi_raw.get("ollama_connect_retries") if isinstance(pi_raw, dict) else None,
+            5,
+        ),
+        ollama_connect_retry_delay_seconds=_float(
+            pi_raw.get("ollama_connect_retry_delay_seconds") if isinstance(pi_raw, dict) else None,
+            2.0,
+        ),
+    )
+    if pi_cfg.timeout_seconds <= 0:
+        raise ValueError("pi.timeout_seconds must be positive")
+
+    amvara_cfg = _parse_amvara_config(raw.get("amvara"))
+    cursor_agent_cfg = _parse_cursor_agent_config(raw.get("cursor_agent"))
+
     return AppConfig(
         timezone=tz,
         discord=discord_cfg,
@@ -550,4 +731,7 @@ def load_config(path: Path) -> AppConfig:
         redmine=redmine_cfg,
         environment_bindings=environment_bindings,
         llm_chain=llm_chain,
+        pi=pi_cfg,
+        amvara=amvara_cfg,
+        cursor_agent=cursor_agent_cfg,
     )

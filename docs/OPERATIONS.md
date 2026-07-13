@@ -65,6 +65,95 @@ ultron wizard
 
 See [README.md — Configuration wizard](../README.md#configuration-wizard-terminal). Implementation lives under [`ultron/wizard/`](../ultron/wizard/).
 
+## systemd (example)
+
+Ultron can be run under **systemd** (same pattern as Jarvys on this host). The repo ships an example unit file at:
+
+- `systemd/ultron.service.example`
+
+Typical host setup (paths assume checkout at `/root/Repos/ultron-redmine`):
+
+1. Create `.env`, `config.yaml`, and `data/` on the host (do not commit them). Keep `ULTRON_STATE_DIR` pointed at the same `data/` directory when migrating from Docker.
+2. Create a venv in the checkout and install:
+
+```bash
+cd /root/Repos/ultron-redmine
+python3 -m venv .venv
+.venv/bin/pip install -U pip
+.venv/bin/pip install -e .
+```
+
+3. Install the unit (edit paths if your checkout lives elsewhere):
+
+```bash
+sudo cp systemd/ultron.service.example /etc/systemd/system/ultron.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now ultron.service
+```
+
+4. After code or dependency changes, redeploy like Jarvys:
+
+```bash
+./scripts/ultron-dump.sh
+```
+
+The dump script runs `pip install -e .`, `npm install` (for **pi** / `/pi`), and `systemctl restart`.
+
+Ensure **cursor-agent** is on **`PATH`** (often `~/.local/bin/cursor-agent`) for Amvara audit fallback and **`/ca`**. If it is not on the systemd unit PATH, extend **`Environment=PATH=...`** in the unit file (see Jarvys `deploy/jarvys.service`).
+
+Notes:
+
+- The template runs as **root** (same as `jarvys.service`), uses `Restart=on-failure`, and appends stdout/stderr to `ultron.log` in the checkout.
+- `CONFIG_PATH` and `ULTRON_STATE_DIR` are absolute so the service does not depend on CWD.
+- Ultron also loads `.env` from the repository root (see `ultron/__main__.py`); `EnvironmentFile=` keeps systemd explicit.
+- Stop any Docker copy (`ultron-redmine-bot`) before enabling systemd — only one process may use the Discord token and `data/`.
+
+## Amvara multi-host audits
+
+Ultron runs on one host (typically **amvara4**) and performs **read-only diagnostics** on other Amvara machines via **`ssh <alias>`** (from `~/.ssh/config`). Agents (**pi**, **cursor-agent**) execute on the Ultron host; they SSH into remote hosts when needed. The local host skips SSH.
+
+| Entry point | Access | Behavior |
+|-------------|--------|----------|
+| **`/audit host text`** | Whitelist | pi first, cursor-agent fallback |
+| **`/ca host text`** | Whitelist | cursor-agent only |
+| **`/pi text`** (no host) | Admin | pi on the Ultron checkout only |
+| **@mention** with `amvaraN` | Whitelist | Prefilter → audit or compound planner |
+
+Configure under **`amvara:`** in `config.yaml` (see **`config.example.yaml`**):
+
+- **`allowed_hosts`** — Security gate; any host not listed is rejected even if mentioned in chat.
+- **`local_host`** — Host name where Ultron runs (no SSH wrapper).
+- **`merge_ssh_config`** — Merge `Host amvara\d+` entries from `~/.ssh/config` at startup (logged).
+- **`audit.prefer_agent`**, **`audit.fallback_enabled`**, **`audit.timeout_seconds`**.
+
+**cursor-agent** fallback: enable **`cursor_agent.enabled`**, install the CLI on PATH (`~/.local/bin/cursor-agent`), or set **`ULTRON_CURSOR_AGENT_BIN`**.
+
+**Compound @mentions** (audit + Redmine note): e.g. “connect to amvara3, check journal, add summary to issue 7001” — prefilter detects both signals, **`nl_planner`** returns a validated multi-step plan, steps run sequentially.
+
+Session logs: **`data/pi/`** and **`data/cursor-agent/`** under **`ULTRON_STATE_DIR`**.
+
+## Self-upgrade, self-repair, and feedback
+
+| Feature | Access | Behavior |
+|---------|--------|----------|
+| **`/upgrade text`** | Bot admins | **cursor-agent** edits the Ultron checkout; verify + **`systemctl restart --no-block`** on success |
+| **Self-repair** | Automatic | On likely **code bugs** in slash handlers (30 min cooldown); same pipeline as `/upgrade` |
+| **Feedback** | N/A | Reports posted to **`reports.channel_id`** (same channel as scheduled summaries) |
+
+Env vars (see [`.env.example`](../.env.example)):
+
+- **`ULTRON_PROJECT_ROOT`** — cursor-agent workspace (default: repository root)
+- **`ULTRON_SYSTEMD_UNIT`** — default `ultron.service`
+- **`ULTRON_SELF_UPGRADE_TIMEOUT_SECONDS`** — default `1800`
+- **`ULTRON_SELF_REPAIR_ENABLED`** — default on
+- **`cursor_agent.enabled`** must be true for `/upgrade`
+
+After a successful `/upgrade`, Ultron calls **`bot.close()`** and systemd replaces the process. Manual fallback: [`scripts/ultron-dump.sh`](../scripts/ultron-dump.sh).
+
+Long-running agent slash commands (`/upgrade`, `/audit`, `/ca`, `/pi`) switch to the **reports channel** if the Discord interaction token expires (~15 minutes).
+
+Agent logs: **`data/self-upgrade/`** under **`ULTRON_STATE_DIR`**.
+
 ## YAML validation
 
 - Parsing and defaults: [`ultron/config.py`](../ultron/config.py) (`load_config`). Invalid YAML or invalid `llm_chain` entries raise **`ValueError`** at startup.

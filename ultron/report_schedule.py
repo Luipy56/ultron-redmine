@@ -25,7 +25,12 @@ def humanize_report_schedule_summary(app_cfg: AppConfig) -> str:
         every = entry.interval_hours
         if every % 24 == 0 and every >= 24:
             d = every // 24
-            freq = f"every {d} days" if d != 1 else "every day"
+            if d == 7:
+                freq = "every week"
+            elif d == 1:
+                freq = "every day"
+            else:
+                freq = f"every {d} days"
         else:
             freq = f"every {every} hours" if every != 1 else "every hour"
         if entry.command == "list_new_issues":

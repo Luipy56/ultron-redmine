@@ -48,6 +48,12 @@ class EnvSettings:
     ultron_nl_commands: bool
     #: Which environment variable names were read (from ``config.yaml`` ``environment_bindings``).
     environment_bindings: EnvironmentBindings
+    #: Ultron checkout root for cursor-agent self-upgrade workspace.
+    ultron_project_root: Path
+    self_upgrade_prompt_path: Path | None
+    self_upgrade_timeout_seconds: int
+    self_repair_enabled: bool
+    systemd_unit: str
 
 
 def _get_env(var_name: str) -> str:
@@ -71,9 +77,32 @@ def _discord_guild_id_for_slash_sync(var_name: str) -> int | None:
     return int(raw)
 
 
-def _env_flag_enabled(var_name: str) -> bool:
+def _env_flag_enabled(var_name: str, *, default: bool = False) -> bool:
     v = _get_env(var_name).lower()
+    if not v:
+        return default
     return v in ("1", "true", "yes", "on")
+
+
+def _parse_path_env(var_name: str, *, default: Path) -> Path:
+    raw = _get_env(var_name)
+    if not raw:
+        p = default
+    else:
+        p = Path(raw).expanduser()
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    return p.resolve()
+
+
+def _parse_timeout_seconds(var_name: str, *, default: int) -> int:
+    raw = _get_env(var_name)
+    if not raw:
+        return default
+    try:
+        return max(60, int(raw))
+    except ValueError:
+        return default
 
 
 def _parse_discord_admin_ids(var_name: str) -> frozenset[int]:
@@ -150,6 +179,10 @@ def load_env(*, require_discord: bool = True, require_redmine: bool = True) -> E
     bot_raw = _get_env(b.bot_owner_contact_env)
     bot_owner_contact = bot_raw or None
 
+    repo_root = Path(__file__).resolve().parent.parent
+    upgrade_prompt_raw = _get_env("ULTRON_SELF_UPGRADE_PROMPT")
+    upgrade_prompt_path = Path(upgrade_prompt_raw).expanduser() if upgrade_prompt_raw else None
+
     return EnvSettings(
         discord_token=token,
         discord_guild_id=_discord_guild_id_for_slash_sync(b.discord_guild_id_env),
@@ -167,4 +200,12 @@ def load_env(*, require_discord: bool = True, require_redmine: bool = True) -> E
         discord_message_content_intent=_env_flag_enabled(b.discord_message_content_intent_env),
         ultron_nl_commands=_env_flag_enabled(b.ultron_nl_commands_env),
         environment_bindings=b,
+        ultron_project_root=_parse_path_env("ULTRON_PROJECT_ROOT", default=repo_root),
+        self_upgrade_prompt_path=upgrade_prompt_path,
+        self_upgrade_timeout_seconds=_parse_timeout_seconds(
+            "ULTRON_SELF_UPGRADE_TIMEOUT_SECONDS",
+            default=1800,
+        ),
+        self_repair_enabled=_env_flag_enabled("ULTRON_SELF_REPAIR_ENABLED", default=True),
+        systemd_unit=_get_env("ULTRON_SYSTEMD_UNIT") or "ultron.service",
     )

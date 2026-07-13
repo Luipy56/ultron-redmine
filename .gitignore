@@ -5,6 +5,9 @@ config.yaml.bak.*
 config.yaml.backup.*
 data/
 .venv/
+ultron.log
+node_modules/
+.pi/
 venv/
 __pycache__/
 *.py[cod]

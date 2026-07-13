@@ -114,16 +114,16 @@ reports:
 # command — list_new_issues | list_unassigned_issues | issues_by_status (issues_by_status requires args.status).
 # list_new_issues / list_unassigned_issues use discord.new_issues / discord.unassigned_open (no args).
 # Legacy aliases: new_issues → list_new_issues; unassigned_issues → list_unassigned_issues.
-# Example: list_new_issues and list_unassigned_issues each every 8h
+# Example: list_new_issues and list_unassigned_issues each once a week
 report_schedule: []
 # report_schedule:
 #   - enabled: true
 #     command: list_new_issues
-#     interval_hours: 8
+#     interval_days: 7
 #     args: {}
 #   - enabled: true
 #     command: list_unassigned_issues
-#     interval_hours: 8
+#     interval_days: 7
 #     args: {}
 #   - enabled: true
 #     command: issues_by_status
@@ -143,6 +143,7 @@ logging:
 # api_key_env — Literal environment variable name whose value is the API key for that slot (read with os.environ; not remapped by environment_bindings). Define that variable in `.env`.
 # model — Single string or ordered list of strings; first is the default for that provider; extras appear in llm_model autocomplete when llm_chain is active.
 # enabled: false — Entry is skipped; if every entry is disabled, Ultron behaves as if there were no chain.
+# `/ol` prefers the first Ollama-like entry (port 11434 or name containing "ollama"); optional llm_provider overrides that.
 llm_chain: []
 
 # Example chain (uncomment as a single block; set api_key_env to names that exist in your .env):
@@ -162,3 +163,53 @@ llm_chain: []
 #     api_key_env: "OPENAI_API_KEY"
 #     timeout_seconds: 120
 #     max_retries: 2
+
+# pi — `/pi` slash command (bot admins only): pi.dev coding agent with Ollama on the Ultron checkout.
+# Requires `npm install` in the repo (`@earendil-works/pi-coding-agent`) and an Ollama-like `llm_chain` entry.
+# Example:
+# pi:
+#   enabled: true
+#   workspace: ""
+#   model: ""
+#   timeout_seconds: 900
+pi: {}
+
+# amvara — Multi-host SSH audits from the Ultron host (`/audit`, `/ca`, NL @mention routing).
+# Agents run locally on the Ultron machine; remote work uses `ssh <alias>` from ~/.ssh/config.
+# Example:
+# amvara:
+#   local_host: amvara4
+#   ssh_config_path: ""
+#   merge_ssh_config: true
+#   allowed_hosts:
+#     - amvara2
+#     - amvara3
+#     - amvara4
+#     - amvara6
+#     - amvara8
+#     - amvara9
+#     - amvara10
+#   servers:
+#     amvara3:
+#       ssh_target: amvara3
+#       workspace: /root
+#       description: "Ops host 3"
+#   audit:
+#     prefer_agent: pi
+#     fallback_enabled: true
+#     timeout_seconds: 900
+amvara: {}
+
+# cursor_agent — Fallback agent for Amvara audits when pi fails or `/ca` is used explicitly.
+# Example:
+# cursor_agent:
+#   enabled: true
+#   bin_path: ""
+#   workspace: ""
+#   timeout_seconds: 900
+cursor_agent:
+  enabled: true
+
+# self_upgrade — /upgrade and automatic self-repair (cursor-agent). Env vars override; see .env.example.
+# self_upgrade:
+#   timeout_seconds: 1800

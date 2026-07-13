@@ -462,10 +462,10 @@ def section_yaml_behavior(q: Any, state: WizardState) -> None:
         "Each entry: enabled, command (list_new_issues | list_unassigned_issues | issues_by_status), "
         "interval_hours or interval_days, args (issues_by_status needs args.status).\n"
     )
-    if _yn(q, "Set report_schedule template (list_new_issues + list_unassigned_issues, each every 8h)?", default=False):
+    if _yn(q, "Set report_schedule template (list_new_issues + list_unassigned_issues, each weekly)?", default=False):
         y["report_schedule"] = [
-            {"enabled": True, "command": "list_new_issues", "interval_hours": 8, "args": {}},
-            {"enabled": True, "command": "list_unassigned_issues", "interval_hours": 8, "args": {}},
+            {"enabled": True, "command": "list_new_issues", "interval_days": 7, "args": {}},
+            {"enabled": True, "command": "list_unassigned_issues", "interval_days": 7, "args": {}},
         ]
         print("Updated report_schedule.\n")
     if _yn(q, "Clear report_schedule (no scheduled channel jobs)?", default=False):

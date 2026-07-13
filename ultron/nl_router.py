@@ -24,6 +24,7 @@ NL_ALLOWED_COMMANDS: frozenset[str] = frozenset(
         "ask_issue",
         "note",
         "log_time",
+        "ol",
     }
 )
 
@@ -43,6 +44,10 @@ NL_FORBIDDEN_COMMANDS: frozenset[str] = frozenset(
         "dev_slot_8",
         "dev_slot_9",
         "dev_slot_10",
+        "pi",
+        "ca",
+        "audit",
+        "upgrade",
     }
 )
 
@@ -69,12 +74,14 @@ Allowed command names and args (only these):
 - ask_issue — args {"issue_id": <int>, "question": "<non-empty string>"}
 - note — args {"issue_id": <int>, "text": "<non-empty note body>"}
 - log_time — args {"issue_id": <positive integer>, "hours": <positive number>}
+- ol — args {"text": "<non-empty question or task for the local advisor>"}
 
 Rules:
 - If the user wants a ticket summary, use summary with issue_id.
 - If they ask a question about a ticket, use ask_issue.
 - If they want to add a note to a ticket, use note.
 - If they want to log spent time / hours on a ticket, use log_time with hours (not minutes unless they specify hours as a decimal).
+- If they want general technical advice, Linux/Redmine/Ultron help, or a conceptual question (not tied to a ticket), use ol with text.
 - If they want a list of new/old/unassigned issues, pick the matching list command.
 - If you are unsure, use kind chat with a brief clarification question.
 - NEVER output approve, remove, show_config, or token — those are not available here.
@@ -195,6 +202,9 @@ def _validate_args(command: str, args: Any) -> dict[str, Any]:
         iid = _as_int(args.get("issue_id"), "issue_id")
         h = _as_positive_hours(args.get("hours"), "hours")
         return {"issue_id": iid, "hours": h}
+    if command == "ol":
+        txt = _as_nonempty_str(args.get("text"), "text")
+        return {"text": txt}
     raise ValueError(f"unknown command {command!r}")
 
 

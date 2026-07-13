@@ -21,6 +21,8 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError
 from ultron import __version__ as _ULTRON_VERSION
 from ultron.discord_format import embed_issue_list_intro, embed_time_summary
 from ultron.discord_interaction_errors import is_unknown_interaction_error
+from ultron.discord_slash import DeferredInteractionGuard, edit_or_followup
+from ultron.feedback import FeedbackReport, send_feedback
 from ultron.config import (
     AppConfig,
     UnassignedOpenConfig,
@@ -40,6 +42,29 @@ from ultron.llm import (
     format_llm_endpoint,
     safe_exc_message,
 )
+from ultron.amvara.executor import (
+    AuditAgent,
+    amvara_availability_message,
+    run_amvara_audit,
+)
+from ultron.amvara.planner import (
+    AmvaraAuditStep,
+    InvokeStep,
+    NLPlan,
+    NLPlanChat,
+    NLPlanParseError,
+    run_nl_planner,
+)
+from ultron.amvara.prefilter import MessageIntent, PrefilterResult, classify_message, extract_amvara_task
+from ultron.amvara.registry import AmvaraRegistry, build_amvara_registry
+from ultron.amvara.ssh_preflight import warm_ssh_known_hosts
+from ultron.ollama_slash import format_ol_reply, run_ol_advisor
+from ultron.pi_agent import (
+    build_pi_run_settings,
+    call_pi_agent,
+    format_pi_reply,
+    pi_availability_message,
+)
 from ultron.nl_router import (
     NLAdminRejected,
     NLChat,
@@ -56,7 +81,14 @@ from ultron.redmine import (
     resolve_time_activity_id,
 )
 from ultron.time_reporting import compute_time_summary_buckets, fetch_spent_on_range_strings
-from ultron.rpsls import MOVES, judge
+from ultron.self_upgrade import (
+    SelfUpgradeMode,
+    SelfUpgradeTrigger,
+    auto_repair_allowed,
+    is_likely_code_bug,
+    make_auto_repair_trigger,
+    run_self_upgrade,
+)
 from ultron.settings import EnvSettings
 from ultron.state_store import (
     consume_token_add_whitelist,
@@ -94,7 +126,7 @@ def _llm_openai_compat_user_message() -> str:
 _NO_LLM_SLASH_MSG = (
     "No language model is configured. Add at least one enabled entry under **llm_chain** in `config.yaml` "
     "(API keys live in `.env` under the variable names set by each entry's **api_key_env**). "
-    "**`/summary`**, **`/ask_issue`**, and **`/note`** need a model."
+    "**`/summary`**, **`/ask_issue`**, **`/note`**, and **`/ol`** need a model."
 )
 _NL_DISABLED_MENTION_MSG = (
     "Natural-language @mention routing is **disabled**. "
@@ -288,12 +320,17 @@ _HELP_TEXT = (
 • `/summary` `issue_id` [`llm_provider`] [`llm_model`] — Ticket summary (requires LLM). Optional provider/model: autocomplete when configured; omit for defaults.
 • `/ask_issue` `issue_id` `question` [`llm_provider`] [`llm_model`] — Answer from the ticket text (requires LLM).
 • `/note` `issue_id` `text` [`llm_provider`] [`llm_model`] — Append an LLM-polished note (requires LLM).
+• `/ol` `text` [`llm_provider`] [`llm_model`] — Ask the configured local model (Ollama when present in **llm_chain**) for technical or general advice. Advisory only — no shell or file access.
+• `/audit` `host` `text` — Run an **Amvara server audit** on an allowlisted host (pi, cursor-agent fallback). SSH diagnostics via agents on the Ultron host.
+• `/ca` `host` `text` — Same as `/audit` but **cursor-agent only** (no pi fallback).
 
-**@mention** or **reply**: whitelisted only. `discord.nl_commands` / `ULTRON_NL_COMMANDS` enables LLM routing into allowed commands.
+**@mention** or **reply**: whitelisted only. `discord.nl_commands` / `ULTRON_NL_COMMANDS` enables LLM routing into allowed commands (including Amvara audits and compound Redmine tasks).
 
-Without **llm_chain**, `/summary`, `/ask_issue`, and `/note` are unavailable; listings, `/ping`, `/rpsls`, and `/token` still work.
+Without **llm_chain**, `/summary`, `/ask_issue`, `/note`, and `/ol` are unavailable; listings, `/ping`, `/rpsls`, and `/token` still work.
 
 **Bot admins only**
+• `/pi` `text` — Run **pi** with Ollama on the Ultron checkout (file/shell access in workspace). Requires `npm install` + Ollama in **llm_chain**.
+• `/upgrade` `text` — Improve or repair Ultron code with **cursor-agent** (verified restart on success). Reports go to the reports channel.
 • `/approve` `token` — Approve a `/token` code.
 • `/remove` `user_id` — Remove from the whitelist.
 • `/show_config` — Non-secret settings (**ephemeral**)."""
@@ -360,6 +397,11 @@ def _nl_dispatch_status_line(command: str, args: dict[str, Any]) -> str:
         return (
             f"Logging **{float(args['hours']):g}** h on issue **#{int(args['issue_id'])}**…"
         )
+    if command == "ol":
+        preview = str(args.get("text", "")).strip().replace("\n", " ")
+        if len(preview) > 80:
+            preview = preview[:79] + "…"
+        return f"Asking the advisor: {preview or '…'}"
     return f"Running **`/{escape_markdown(command)}`**…"
 
 
@@ -766,6 +808,27 @@ def _format_show_config(app_cfg: AppConfig, env: EnvSettings) -> str:
             label = spec.name or f"entry[{i}]"
             models_s = ", ".join(spec.models) if len(spec.models) > 1 else spec.model
             lines.append(f"  – {label}: `{spec.base_url}` / models `{models_s}`")
+    pi_msg = pi_availability_message(app_cfg)
+    if pi_msg is None:
+        lines.append(f"• **pi:** enabled · workspace `{app_cfg.pi.workspace or '(checkout root)'}`")
+    else:
+        lines.append(f"• **pi:** unavailable — {pi_msg.replace('**', '')}")
+    amvara_msg = amvara_availability_message(app_cfg)
+    if amvara_msg is None:
+        hosts = ", ".join(h.name for h in build_amvara_registry(app_cfg.amvara).hosts) or "(none)"
+        lines.append(
+            f"• **amvara:** local `{app_cfg.amvara.local_host}` · allowed: {hosts} · "
+            f"prefer `{app_cfg.amvara.audit.prefer_agent}` · fallback={app_cfg.amvara.audit.fallback_enabled}"
+        )
+    else:
+        lines.append(f"• **amvara:** unavailable — {amvara_msg.replace('**', '')}")
+    ca_on = app_cfg.cursor_agent.enabled
+    lines.append(f"• **cursor_agent:** {'enabled' if ca_on else 'disabled'}")
+    lines.append(
+        f"• **self_upgrade:** systemd `{getattr(env, 'systemd_unit', 'ultron.service')}` · "
+        f"self_repair={'on' if env.self_repair_enabled else 'off'} · "
+        f"feedback_channel=reports.channel_id ({app_cfg.reports.channel_id or 'unset'})"
+    )
     return "\n".join(lines)
 
 
@@ -796,7 +859,7 @@ async def _tree_interaction_check(env: EnvSettings, interaction: discord.Interac
         except discord.HTTPException as e:
             logger.warning("%s unauthorized reply failed: %s", name, e)
         return False
-    if name in ("approve", "remove", "show_config"):
+    if name in ("approve", "remove", "show_config", "pi", "upgrade"):
         if is_admin(env.state_dir, interaction.user.id, env.discord_admin_ids):
             return True
         log_slash_input(name, interaction)
@@ -1100,7 +1163,50 @@ class UltronCommandTree(app_commands.CommandTree):
             name = cmd.name if cmd is not None else "?"
             log_slash_discord_unknown_interaction(name, interaction)
             return
-        await super().on_error(interaction, error)
+
+        bot: UltronBot = self.client  # type: ignore[assignment]
+        cmd_name = interaction.command.name if interaction.command else "unknown"
+        logger.exception("slash command error /%s: %s", cmd_name, error)
+
+        if getattr(bot, "_self_upgrade_active", False):
+            await _reply_slash_command_error(interaction, cmd_name, error)
+            return
+
+        root_exc = error.original if isinstance(error, app_commands.AppCommandError) and error.original else error
+        if is_likely_code_bug(root_exc) and auto_repair_allowed(bot.env):
+            bot._self_upgrade_active = True
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        "A code error occurred. Ultron is attempting **self-repair** — "
+                        "see the reports channel for the report.",
+                        ephemeral=True,
+                    )
+            except discord.HTTPException:
+                pass
+            trigger = make_auto_repair_trigger(root_exc, command=cmd_name)
+            asyncio.create_task(
+                bot._run_self_repair(trigger),
+                name=f"ultron-self-repair-{cmd_name}",
+            )
+            return
+
+        await _reply_slash_command_error(interaction, cmd_name, error)
+
+
+async def _reply_slash_command_error(
+    interaction: discord.Interaction,
+    cmd_name: str,
+    error: Exception,
+) -> None:
+    safe = f"**Command failed:** `/{cmd_name}`\n{type(error).__name__}: {error}"[:_DISCORD_MSG_MAX]
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(safe, ephemeral=True)
+        else:
+            await interaction.response.send_message(safe, ephemeral=True)
+    except discord.HTTPException as e:
+        logger.warning("slash error reply failed for /%s: %s", cmd_name, e)
 
 
 def _nl_commands_enabled(app_cfg: AppConfig, env: EnvSettings) -> bool:
@@ -1168,6 +1274,68 @@ class UltronBot(commands.Bot):
         self._report_schedule_last_run: dict[int, datetime] = {}
         #: Counts of successful Redmine-mutating operations in this process (for `/status`).
         self._redmine_writes: dict[str, int] = {}
+        self.amvara_registry: AmvaraRegistry = build_amvara_registry(app_cfg.amvara)
+        try:
+            warmed = warm_ssh_known_hosts(self.amvara_registry, app_cfg.amvara)
+            logger.info(
+                "Amvara SSH preflight: %s remote host(s) ready",
+                warmed,
+                extra=_STARTUP_LOG_EXTRA,
+            )
+        except Exception as e:
+            logger.warning("Amvara SSH preflight warm failed: %s", e, extra=_STARTUP_LOG_EXTRA)
+        self._self_upgrade_active = False
+
+    def _secret_literals(self) -> list[str]:
+        literals = [self.env.discord_token, self.env.redmine_api_key]
+        if self.env.llm_api_key:
+            literals.append(self.env.llm_api_key)
+        return literals
+
+    async def _deliver_slash_feedback(
+        self,
+        interaction: discord.Interaction,
+        *,
+        title: str,
+        body: str,
+        via_feedback: bool,
+    ) -> None:
+        literals = self._secret_literals()
+        report = FeedbackReport(title=title, body=body, kind="info")
+        if via_feedback:
+            await send_feedback(
+                self,
+                self.app_cfg,
+                report,
+                interaction=interaction,
+                secret_literals=literals,
+            )
+            return
+        from ultron.sanitize import sanitize_for_discord
+
+        text = f"**{title}**\n\n{sanitize_for_discord(body, secret_literals=literals)}"[:_DISCORD_MSG_MAX]
+        if not await edit_or_followup(interaction, text, ephemeral=False):
+            await send_feedback(
+                self,
+                self.app_cfg,
+                report,
+                interaction=interaction,
+                secret_literals=literals,
+            )
+
+    async def _run_self_repair(self, trigger: SelfUpgradeTrigger) -> None:
+        try:
+            await run_self_upgrade(
+                self,
+                self.env,
+                self.app_cfg,
+                trigger,
+                secret_literals=self._secret_literals(),
+            )
+        except Exception:
+            logger.exception("self-repair task failed")
+        finally:
+            self._self_upgrade_active = False
 
     def record_redmine_write(self, operation: str) -> None:
         self._redmine_writes[operation] = self._redmine_writes.get(operation, 0) + 1
@@ -1244,14 +1412,18 @@ class UltronBot(commands.Bot):
             return
 
         nl_on = _nl_commands_enabled(self.app_cfg, self.env)
-        if nl_on and self.env.llm_enabled:
+        user_text = (discord_message.content or "").strip()
+        pre = classify_message(user_text) if nl_on else None
+        amvara_only = pre is not None and pre.intent == MessageIntent.AMVARA_ONLY
+        if nl_on and (self.env.llm_enabled or amvara_only):
             await self._handle_nl_chat_message(discord_message, via)
             return
         if nl_on and not self.env.llm_enabled:
             log_chat_mention_input(discord_message, fields="path=needs_llm", feature="nl_router")
             try:
                 await discord_message.reply(
-                    "Natural-language routing for @mentions needs a configured **language model**. "
+                    "Natural-language routing for @mentions needs a configured **language model** "
+                    "(except pure Amvara audit requests when **amvara.allowed_hosts** is configured). "
                     "Use slash commands, or ask an operator to configure **llm_chain** in `config.yaml` (and API keys in `.env`).",
                     mention_author=False,
                 )
@@ -1281,12 +1453,16 @@ class UltronBot(commands.Bot):
             log_chat_mention_error(discord_message, action="reply failed", detail=e, feature="nl_disabled")
 
     async def _handle_nl_chat_message(self, message: discord.Message, via: str) -> None:
-        """LLM router → validated dispatch (whitelist already checked)."""
+        """Prefilter → Amvara audit, compound planner, or LLM router (whitelist already checked)."""
         user_text = (message.content or "").strip()
         preview = _truncate_for_log(user_text)
+        pre = classify_message(user_text)
         log_chat_mention_input(
             message,
-            fields=f"via={via} text_preview={preview!r}",
+            fields=(
+                f"via={via} intent={pre.intent.value} hosts={pre.amvara_hosts!r} "
+                f"issues={pre.issue_ids!r} text_preview={preview!r}"
+            ),
             feature="nl_router",
         )
 
@@ -1301,16 +1477,34 @@ class UltronBot(commands.Bot):
                 feature="nl_router",
             )
 
+        if pre.intent == MessageIntent.AMVARA_ONLY:
+            await self._run_nl_amvara_only(message, user_text, pre, status_message=status_msg, via=via)
+            return
+        if pre.intent == MessageIntent.COMPOUND:
+            await self._run_nl_compound(message, user_text, pre, status_message=status_msg, via=via)
+            return
+
+        await self._run_nl_redmine_router(message, user_text, status_message=status_msg, via=via)
+
+    async def _run_nl_redmine_router(
+        self,
+        message: discord.Message,
+        user_text: str,
+        *,
+        status_message: discord.Message | None,
+        via: str,
+    ) -> None:
+        """Existing single-shot NL router (Redmine-only or general)."""
         t0 = time.monotonic()
         try:
             outcome = await run_nl_router(self.llm, user_text=user_text, via=via)
         except NoLLMConfiguredError:
-            await _nl_edit_or_reply(message, status_msg, _NO_LLM_SLASH_MSG)
+            await _nl_edit_or_reply(message, status_message, _NO_LLM_SLASH_MSG)
             log_chat_mention_output(message, action="routed (no LLM at runtime)", feature="nl_router")
             return
         except (APITimeoutError, httpx.TimeoutException) as e:
             logger.warning("nl_router LLM timeout: %s", e)
-            await _nl_edit_or_reply(message, status_msg, _TIMEOUT_USER_MSG)
+            await _nl_edit_or_reply(message, status_message, _TIMEOUT_USER_MSG)
             log_chat_mention_output(message, action="routed (LLM timeout)", feature="nl_router")
             return
         except LLMChainExhaustedError as e:
@@ -1320,7 +1514,7 @@ class UltronBot(commands.Bot):
                 type(e.last_error).__name__,
                 safe_exc_message(e.last_error),
             )
-            await _nl_edit_or_reply(message, status_msg, self.app_cfg.discord.llm_chain_all_failed_message)
+            await _nl_edit_or_reply(message, status_message, self.app_cfg.discord.llm_chain_all_failed_message)
             log_chat_mention_output(message, action="routed (LLM chain exhausted)", feature="nl_router")
             return
         except (APIConnectionError, APIStatusError) as e:
@@ -1331,7 +1525,7 @@ class UltronBot(commands.Bot):
             )
             await _nl_edit_or_reply(
                 message,
-                status_msg,
+                status_message,
                 _llm_openai_compat_user_message(),
             )
             log_chat_mention_output(message, action="routed (LLM API error)", feature="nl_router")
@@ -1340,7 +1534,7 @@ class UltronBot(commands.Bot):
             logger.exception("nl_router failed: %s", e)
             await _nl_edit_or_reply(
                 message,
-                status_msg,
+                status_message,
                 "Could not route your message. Check bot logs.",
             )
             log_chat_mention_error(message, action="nl_router exception", detail=e, feature="nl_router")
@@ -1359,7 +1553,15 @@ class UltronBot(commands.Bot):
             elapsed,
             extra={"chat_phase": "ROUTER", "message_source": "chat"},
         )
+        await self._dispatch_nl_router_outcome(message, outcome, status_message=status_message)
 
+    async def _dispatch_nl_router_outcome(
+        self,
+        message: discord.Message,
+        outcome: NLAdminRejected | NLParseError | NLChat | NLInvoke,
+        *,
+        status_message: discord.Message | None,
+    ) -> None:
         if isinstance(outcome, NLAdminRejected):
             logger.warning(
                 "source=chat | nl_router | rejected_admin_command | command=%s user_id=%s",
@@ -1374,7 +1576,7 @@ class UltronBot(commands.Bot):
             )
             await _nl_edit_or_reply(
                 message,
-                status_msg,
+                status_message,
                 "I cannot run **admin** or **token** commands from chat. "
                 "Use slash commands such as **`/approve`**, **`/remove`**, **`/show_config`**, **`/token`**.",
             )
@@ -1388,20 +1590,20 @@ class UltronBot(commands.Bot):
         if isinstance(outcome, NLParseError):
             await _nl_edit_or_reply(
                 message,
-                status_msg,
+                status_message,
                 f"I could not interpret that ({outcome.detail}). Try rephrasing or use slash commands.",
             )
             log_chat_mention_output(message, action="parse error reply", feature="nl_router")
             return
         if isinstance(outcome, NLChat):
-            await _reply_chunked_to_message(message, outcome.message, edit_first=status_msg)
+            await _reply_chunked_to_message(message, outcome.message, edit_first=status_message)
             log_chat_mention_output(message, action="conversational chat reply", feature="nl_router")
             return
         if isinstance(outcome, NLInvoke):
             dispatch_line = _nl_dispatch_status_line(outcome.command, outcome.args)
             try:
-                if status_msg is not None:
-                    await status_msg.edit(content=dispatch_line)
+                if status_message is not None:
+                    await status_message.edit(content=dispatch_line)
             except discord.HTTPException:
                 pass
             logger.info(
@@ -1416,14 +1618,288 @@ class UltronBot(commands.Bot):
                 _truncate_for_log(dispatch_line, 160),
                 extra={"chat_phase": "ROUTER", "message_source": "chat"},
             )
-            await self._run_nl_invoke(message, outcome, status_message=status_msg)
+            await self._run_nl_invoke(message, outcome, status_message=status_message)
             log_chat_mention_output(
                 message,
                 action="invoke completed",
                 fields=f"command={outcome.command!r}",
                 feature="nl_router",
             )
+
+    async def _run_nl_amvara_only(
+        self,
+        message: discord.Message,
+        user_text: str,
+        pre: PrefilterResult,
+        *,
+        status_message: discord.Message | None,
+        via: str,
+    ) -> None:
+        unavailable = amvara_availability_message(self.app_cfg)
+        if unavailable is not None:
+            await _nl_edit_or_reply(message, status_message, unavailable)
+            log_chat_mention_output(message, action="amvara unavailable", feature="nl_amvara")
             return
+
+        host = pre.amvara_hosts[0]
+        if len(pre.amvara_hosts) > 1:
+            logger.warning("nl_amvara: multiple hosts mentioned, using first: %s", host)
+
+        task = extract_amvara_task(user_text, pre.amvara_hosts)
+        try:
+            self.amvara_registry.validate_host(host)
+        except ValueError as e:
+            await _nl_edit_or_reply(message, status_message, str(e))
+            log_chat_mention_output(message, action="amvara host rejected", feature="nl_amvara")
+            return
+
+        status_line = f"Running **Amvara audit** on **`{escape_markdown(host)}`**…"
+        try:
+            if status_message is not None:
+                await status_message.edit(content=status_line)
+        except discord.HTTPException:
+            pass
+
+        logger.info(
+            "source=chat | nl_amvara | host=%s | task_preview=%s",
+            host,
+            _truncate_for_log(task),
+            extra={"chat_phase": "ROUTER", "message_source": "chat", "intent": "amvara_only"},
+        )
+        await self._deliver_amvara_audit_reply(
+            message,
+            host=host,
+            task=task,
+            status_message=status_message,
+            session_context=f"Discord user: {message.author} (id={message.author.id}). via={via}",
+            feature="nl_amvara",
+        )
+
+    async def _run_nl_compound(
+        self,
+        message: discord.Message,
+        user_text: str,
+        pre: PrefilterResult,
+        *,
+        status_message: discord.Message | None,
+        via: str,
+    ) -> None:
+        if not self.env.llm_enabled:
+            await _nl_edit_or_reply(message, status_message, _NO_LLM_SLASH_MSG)
+            return
+
+        try:
+            if status_message is not None:
+                await status_message.edit(content="Planning multi-step task…")
+        except discord.HTTPException:
+            pass
+
+        t0 = time.monotonic()
+        try:
+            outcome = await run_nl_planner(
+                self.llm,
+                user_text=user_text,
+                registry=self.amvara_registry,
+                via=via,
+            )
+        except (APITimeoutError, httpx.TimeoutException):
+            await _nl_edit_or_reply(message, status_message, _TIMEOUT_USER_MSG)
+            return
+        except LLMChainExhaustedError:
+            await _nl_edit_or_reply(message, status_message, self.app_cfg.discord.llm_chain_all_failed_message)
+            return
+        except (APIConnectionError, APIStatusError):
+            await _nl_edit_or_reply(message, status_message, _llm_openai_compat_user_message())
+            return
+        except Exception as e:
+            logger.exception("nl_planner failed: %s", e)
+            await _nl_edit_or_reply(message, status_message, "Could not plan that task. Check bot logs.")
+            return
+
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "source=chat | nl_planner | outcome=%s | steps=%s | elapsed_s=%.3f",
+            type(outcome).__name__,
+            len(outcome.steps) if isinstance(outcome, NLPlan) else 0,
+            elapsed,
+            extra={"chat_phase": "ROUTER", "message_source": "chat", "intent": "compound"},
+        )
+
+        if isinstance(outcome, NLPlanParseError):
+            await _nl_edit_or_reply(
+                message,
+                status_message,
+                f"I could not plan that ({outcome.detail}). Try rephrasing or use slash commands.",
+            )
+            return
+        if isinstance(outcome, NLPlanChat):
+            await _reply_chunked_to_message(message, outcome.message, edit_first=status_message)
+            return
+        if isinstance(outcome, NLPlan):
+            await self._run_nl_plan(message, outcome, status_message=status_message, via=via)
+
+    async def _run_nl_plan(
+        self,
+        message: discord.Message,
+        plan: NLPlan,
+        *,
+        status_message: discord.Message | None,
+        via: str,
+    ) -> None:
+        last_audit_body = ""
+        n = len(plan.steps)
+        for i, step in enumerate(plan.steps):
+            step_no = i + 1
+            if isinstance(step, AmvaraAuditStep):
+                line = (
+                    f"Step **{step_no}/{n}**: Amvara audit on **`{escape_markdown(step.host)}`**…"
+                )
+                try:
+                    if status_message is not None:
+                        await status_message.edit(content=line)
+                except discord.HTTPException:
+                    pass
+                try:
+                    async def on_progress(phase: str, *, _host: str = step.host) -> None:
+                        if status_message is None:
+                            return
+                        try:
+                            await status_message.edit(
+                                content=f"Step **{step_no}/{n}** · `{_host}` · {phase}"
+                            )
+                        except discord.HTTPException:
+                            pass
+
+                    result = await run_amvara_audit(
+                        app_cfg=self.app_cfg,
+                        registry=self.amvara_registry,
+                        host_name=step.host,
+                        task=step.task,
+                        state_dir=self.env.state_dir,
+                        session_context=(
+                            f"Discord user: {message.author} (id={message.author.id}). "
+                            f"Compound plan step {step_no}/{n}. via={via}"
+                        ),
+                        on_progress=on_progress,
+                        secret_literals=self._secret_literals(),
+                    )
+                    last_audit_body = result.body
+                except ValueError as e:
+                    await _nl_edit_or_reply(message, status_message, str(e))
+                    return
+                except TimeoutError as e:
+                    await _nl_edit_or_reply(
+                        message,
+                        status_message,
+                        f"**Timed out**\n{e}\nTry a narrower task or raise **amvara.audit.timeout_seconds**.",
+                    )
+                    return
+                except RuntimeError as e:
+                    await _nl_edit_or_reply(message, status_message, str(e))
+                    return
+                except Exception as e:
+                    logger.exception("compound amvara audit failed: %s", e)
+                    await _nl_edit_or_reply(
+                        message,
+                        status_message,
+                        f"Amvara audit failed: {type(e).__name__}: {e}",
+                    )
+                    return
+
+                has_later_invoke = any(isinstance(s, InvokeStep) for s in plan.steps[i + 1 :])
+                if not has_later_invoke:
+                    parts = chunk_discord(result.body)
+                    await _reply_chunked_to_message(message, parts[0], edit_first=status_message)
+                    for part in parts[1:]:
+                        await message.reply(part[:_DISCORD_MSG_MAX], mention_author=False)
+                else:
+                    try:
+                        if status_message is not None:
+                            await status_message.edit(
+                                content=f"Step **{step_no}/{n}** complete · continuing…"
+                            )
+                    except discord.HTTPException:
+                        pass
+                continue
+
+            if isinstance(step, InvokeStep):
+                args = dict(step.args)
+                if step.command == "note" and last_audit_body.strip():
+                    note_text = str(args.get("text", "")).strip()
+                    args["text"] = f"{note_text}\n\n---\n\nAudit findings:\n{last_audit_body.strip()}"
+                inv = NLInvoke(command=step.command, args=args)
+                line = _nl_dispatch_status_line(step.command, args)
+                line = f"Step **{step_no}/{n}**: {line}"
+                try:
+                    if status_message is not None:
+                        await status_message.edit(content=line)
+                except discord.HTTPException:
+                    pass
+                await self._run_nl_invoke(message, inv, status_message=status_message)
+
+    async def _deliver_amvara_audit_reply(
+        self,
+        message: discord.Message,
+        *,
+        host: str,
+        task: str,
+        status_message: discord.Message | None,
+        session_context: str,
+        feature: str,
+    ) -> None:
+        try:
+            async def on_progress(phase: str) -> None:
+                if status_message is None:
+                    return
+                try:
+                    await status_message.edit(
+                        content=f"**Amvara audit** · `{host}` · {phase}"
+                    )
+                except discord.HTTPException:
+                    pass
+
+            result = await run_amvara_audit(
+                app_cfg=self.app_cfg,
+                registry=self.amvara_registry,
+                host_name=host,
+                task=task,
+                state_dir=self.env.state_dir,
+                session_context=session_context,
+                on_progress=on_progress,
+                secret_literals=self._secret_literals(),
+            )
+        except ValueError as e:
+            await _nl_edit_or_reply(message, status_message, str(e))
+            log_chat_mention_output(message, action="amvara validation error", feature=feature)
+            return
+        except TimeoutError as e:
+            await _nl_edit_or_reply(
+                message,
+                status_message,
+                f"**Timed out**\n{e}\nTry a narrower task or raise **amvara.audit.timeout_seconds**.",
+            )
+            log_chat_mention_output(message, action="amvara timeout", feature=feature)
+            return
+        except RuntimeError as e:
+            await _nl_edit_or_reply(message, status_message, str(e))
+            log_chat_mention_output(message, action="amvara runtime error", feature=feature)
+            return
+        except Exception as e:
+            logger.exception("amvara audit failed: %s", e)
+            await _nl_edit_or_reply(message, status_message, f"Amvara audit failed: {type(e).__name__}: {e}")
+            log_chat_mention_error(message, action="amvara exception", detail=e, feature=feature)
+            return
+
+        parts = chunk_discord(result.body)
+        await _reply_chunked_to_message(message, parts[0], edit_first=status_message)
+        for part in parts[1:]:
+            await message.reply(part[:_DISCORD_MSG_MAX], mention_author=False)
+        log_chat_mention_output(
+            message,
+            action="amvara audit delivered",
+            fields=f"host={host!r} agent={result.agent.value} ok={result.ok}",
+            feature=feature,
+        )
 
     async def _run_nl_invoke(
         self,
@@ -1590,6 +2066,26 @@ class UltronBot(commands.Bot):
                 excerpt = posted[:500] + ("…" if len(posted) > 500 else "")
                 reply = f"Note added to [{issue_id}]({url}).\n\n**Preview:**\n{excerpt}"
                 self.record_redmine_write("issue_note")
+                await _reply_chunked_to_message(message, reply, edit_first=status_message)
+                return
+            if cmd == "ol":
+                if not self.env.llm_enabled:
+                    await _err(_NO_LLM_SLASH_MSG)
+                    return
+                chain = self.app_cfg.llm_chain
+                if chain is None:
+                    await _err(_NO_LLM_SLASH_MSG)
+                    return
+                text = str(args["text"])
+                display_model, body = await run_ol_advisor(
+                    llm=self.llm,
+                    chain=chain,
+                    user_text=text,
+                    session_context=(
+                        f"Discord user: {message.author} (id={message.author.id}). NL invoke: ol"
+                    ),
+                )
+                reply = format_ol_reply(display_model=display_model, body=body)
                 await _reply_chunked_to_message(message, reply, edit_first=status_message)
                 return
         except IssueNotFound:
@@ -2210,6 +2706,393 @@ class UltronBot(commands.Bot):
             _log_slash_command_failure("note", e)
             await note_error("Something went wrong. Check bot logs.")
 
+    async def _run_slash_ol(
+        self,
+        interaction: discord.Interaction,
+        text: str,
+        *,
+        llm_provider: str | None,
+        llm_model: str | None,
+        cmd_need_prov: bool,
+        cmd_need_model: bool,
+    ) -> None:
+        ephemeral = self.app_cfg.discord.ephemeral_default
+        task = text.strip()
+        fields = f"text_len={len(task)} ephemeral={ephemeral}"
+        if cmd_need_prov:
+            fields += f" llm_provider={llm_provider!r}"
+        if cmd_need_model:
+            fields += f" llm_model={llm_model!r}"
+        log_slash_input("ol", interaction, fields=fields)
+
+        if not task:
+            await interaction.response.send_message(
+                "Provide a **text** argument with your question or task.",
+                ephemeral=True,
+            )
+            log_slash_output("ol", interaction, action="rejected (empty text)")
+            return
+
+        if not self.env.llm_enabled:
+            await interaction.response.send_message(_NO_LLM_SLASH_MSG, ephemeral=ephemeral)
+            log_slash_output("ol", interaction, action="rejected (no language model configured)")
+            return
+
+        chain = self.app_cfg.llm_chain
+        if chain is None:
+            await interaction.response.send_message(_NO_LLM_SLASH_MSG, ephemeral=ephemeral)
+            log_slash_output("ol", interaction, action="rejected (no llm_chain)")
+            return
+
+        async def ol_error(msg: str) -> None:
+            if len(msg) <= _DISCORD_MSG_MAX:
+                await _edit_or_followup(interaction, msg, ephemeral=ephemeral)
+            else:
+                try:
+                    await interaction.followup.send(msg, ephemeral=ephemeral)
+                except discord.HTTPException as e:
+                    logger.error("followup failed for long /ol error: %s", e)
+                    if getattr(e, "code", None) == 50027 or e.status == 401:
+                        await _notify_if_interaction_dead(interaction, msg, ephemeral=ephemeral)
+            short = msg.replace("\n", " ")[:120]
+            log_slash_output("ol", interaction, action="user-visible error", fields=f"detail={short!r}")
+
+        try:
+            await interaction.response.defer(ephemeral=ephemeral, thinking=True)
+        except discord.HTTPException as e:
+            if is_unknown_interaction_error(e):
+                log_slash_discord_unknown_interaction("ol", interaction)
+                return
+            log_slash_error("ol", interaction, action="defer failed", detail=e)
+            raise
+
+        log_slash_output("ol", interaction, action="deferred (/ol pipeline)")
+
+        try:
+            try:
+                llm_chain_resolve_start_index(
+                    chain, llm_provider if cmd_need_prov and (llm_provider or "").strip() else None
+                )
+            except ValueError as ve:
+                await ol_error(str(ve))
+                return
+
+            on_skip = _llm_chain_skip_discord_cb(
+                interaction=interaction,
+                ephemeral=ephemeral,
+                template=self.app_cfg.discord.llm_chain_skip_status,
+            )
+
+            async def on_progress(phase: str) -> None:
+                await _edit_or_followup(interaction, f"**Ollama** · {phase}", ephemeral=ephemeral)
+
+            display_model, body = await run_ol_advisor(
+                llm=self.llm,
+                chain=chain,
+                user_text=task,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                cmd_need_prov=cmd_need_prov,
+                cmd_need_model=cmd_need_model,
+                session_context=(
+                    f"Discord user: {interaction.user} (id={interaction.user.id}). Command: /ol"
+                ),
+                on_chain_skip=on_skip,
+                on_progress=on_progress,
+            )
+            reply = format_ol_reply(display_model=display_model, body=body)
+            parts = chunk_discord(reply)
+            await _edit_or_followup(interaction, parts[0], ephemeral=ephemeral)
+            for part in parts[1:]:
+                await interaction.followup.send(part[:_DISCORD_MSG_MAX], ephemeral=ephemeral)
+            log_slash_output(
+                "ol",
+                interaction,
+                action="delivered advisor reply",
+                fields=f"model={display_model!r} chunks={len(parts)}",
+            )
+        except ValueError as ve:
+            await ol_error(str(ve))
+        except RuntimeError as e:
+            await ol_error(str(e))
+            log_slash_error("ol", interaction, action="runtime error", detail=e)
+        except (APITimeoutError, httpx.TimeoutException):
+            await ol_error(_TIMEOUT_USER_MSG)
+            log_slash_error("ol", interaction, action="timeout")
+        except (APIConnectionError, APIStatusError) as e:
+            logger.warning(
+                "/ol LLM API error | %s: %s",
+                type(e).__name__,
+                safe_exc_message(e),
+            )
+            await ol_error(_llm_openai_compat_user_message())
+            log_slash_error("ol", interaction, action="LLM API error", detail=e)
+        except LLMChainExhaustedError:
+            await ol_error(self.app_cfg.discord.llm_chain_all_failed_message)
+            log_slash_error("ol", interaction, action="llm_chain exhausted")
+        except Exception as e:
+            _log_slash_command_failure("ol", e)
+            await ol_error("Something went wrong. Check bot logs.")
+
+    async def _run_slash_pi(self, interaction: discord.Interaction, text: str) -> None:
+        task = text.strip()
+        log_slash_input("pi", interaction, fields=f"text_len={len(task)}")
+
+        if not task:
+            await interaction.response.send_message(
+                "Provide a **text** argument with your task or question.",
+                ephemeral=True,
+            )
+            log_slash_output("pi", interaction, action="rejected (empty text)")
+            return
+
+        unavailable = pi_availability_message(self.app_cfg)
+        if unavailable is not None:
+            await interaction.response.send_message(unavailable, ephemeral=True)
+            log_slash_output("pi", interaction, action="rejected (pi not available)")
+            return
+
+        async def pi_error(msg: str) -> None:
+            await _edit_or_followup(interaction, msg[:_DISCORD_MSG_MAX], ephemeral=False)
+            short = msg.replace("\n", " ")[:120]
+            log_slash_output("pi", interaction, action="user-visible error", fields=f"detail={short!r}")
+
+        try:
+            await interaction.response.defer(ephemeral=False, thinking=True)
+        except discord.HTTPException as e:
+            if is_unknown_interaction_error(e):
+                log_slash_discord_unknown_interaction("pi", interaction)
+                return
+            log_slash_error("pi", interaction, action="defer failed", detail=e)
+            raise
+
+        log_slash_output("pi", interaction, action="deferred (/pi pipeline)")
+
+        guard = DeferredInteractionGuard(interaction)
+        await guard.start()
+        try:
+            settings = build_pi_run_settings(
+                self.app_cfg,
+                state_dir=self.env.state_dir,
+            )
+
+            async def on_progress(phase: str) -> None:
+                await _edit_or_followup(interaction, f"**Pi agent** · {phase}", ephemeral=False)
+
+            result = await call_pi_agent(
+                settings,
+                user_request=task,
+                session_context=(
+                    f"Discord admin: {interaction.user} (id={interaction.user.id}). Command: /pi"
+                ),
+                on_progress=on_progress,
+            )
+            literals = self._secret_literals()
+            reply = format_pi_reply(result=result, secret_literals=literals)
+            via_feedback = guard.use_feedback
+            guard.stop()
+            if via_feedback:
+                await self._deliver_slash_feedback(
+                    interaction,
+                    title="Ultron · /pi",
+                    body=reply,
+                    via_feedback=True,
+                )
+            else:
+                parts = chunk_discord(reply)
+                await _edit_or_followup(interaction, parts[0], ephemeral=False)
+                for part in parts[1:]:
+                    await interaction.followup.send(part[:_DISCORD_MSG_MAX], ephemeral=False)
+            log_slash_output(
+                "pi",
+                interaction,
+                action="delivered pi reply",
+                fields=f"exit={result.exit_code} model={result.model!r} via_feedback={via_feedback}",
+            )
+        except TimeoutError as e:
+            guard.stop()
+            await pi_error(
+                f"**Timed out**\n{e}\nTry a narrower task or raise **pi.timeout_seconds** in `config.yaml`."
+            )
+            log_slash_error("pi", interaction, action="timeout", detail=e)
+        except ConnectionError as e:
+            guard.stop()
+            await pi_error(f"**Ollama unavailable**\n{e}")
+            log_slash_error("pi", interaction, action="connection error", detail=e)
+        except RuntimeError as e:
+            guard.stop()
+            await pi_error(str(e))
+            log_slash_error("pi", interaction, action="runtime error", detail=e)
+        except Exception as e:
+            guard.stop()
+            _log_slash_command_failure("pi", e)
+            await pi_error(f"**Error**\n{type(e).__name__}: {e}")
+
+    async def _run_slash_amvara(
+        self,
+        interaction: discord.Interaction,
+        *,
+        host: str,
+        text: str,
+        force_agent: AuditAgent | None = None,
+        cmd_name: str,
+    ) -> None:
+        task = text.strip()
+        host_key = host.strip().casefold()
+        log_slash_input(cmd_name, interaction, fields=f"host={host_key!r} text_len={len(task)}")
+
+        if not task:
+            await interaction.response.send_message(
+                "Provide a **text** argument with your audit task.",
+                ephemeral=True,
+            )
+            log_slash_output(cmd_name, interaction, action="rejected (empty text)")
+            return
+
+        unavailable = amvara_availability_message(self.app_cfg)
+        if unavailable is not None:
+            await interaction.response.send_message(unavailable, ephemeral=True)
+            log_slash_output(cmd_name, interaction, action="rejected (amvara unavailable)")
+            return
+
+        try:
+            self.amvara_registry.validate_host(host_key)
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            log_slash_output(cmd_name, interaction, action="rejected (host not allowed)")
+            return
+
+        if force_agent == AuditAgent.CURSOR_AGENT and not self.app_cfg.cursor_agent.enabled:
+            await interaction.response.send_message(
+                "**cursor-agent** is disabled. Enable **cursor_agent.enabled** in `config.yaml` or use **`/audit`**.",
+                ephemeral=True,
+            )
+            log_slash_output(cmd_name, interaction, action="rejected (cursor-agent disabled)")
+            return
+
+        async def slash_error(msg: str) -> None:
+            await _edit_or_followup(interaction, msg[:_DISCORD_MSG_MAX], ephemeral=False)
+            short = msg.replace("\n", " ")[:120]
+            log_slash_output(cmd_name, interaction, action="user-visible error", fields=f"detail={short!r}")
+
+        try:
+            await interaction.response.defer(ephemeral=False, thinking=True)
+        except discord.HTTPException as e:
+            if is_unknown_interaction_error(e):
+                log_slash_discord_unknown_interaction(cmd_name, interaction)
+                return
+            log_slash_error(cmd_name, interaction, action="defer failed", detail=e)
+            raise
+
+        log_slash_output(cmd_name, interaction, action=f"deferred (/{cmd_name} pipeline)")
+
+        guard = DeferredInteractionGuard(interaction)
+        await guard.start()
+        try:
+            async def on_progress(phase: str) -> None:
+                await _edit_or_followup(
+                    interaction,
+                    f"**Amvara audit** · `{host_key}` · {phase}",
+                    ephemeral=False,
+                )
+
+            result = await run_amvara_audit(
+                app_cfg=self.app_cfg,
+                registry=self.amvara_registry,
+                host_name=host_key,
+                task=task,
+                state_dir=self.env.state_dir,
+                session_context=(
+                    f"Discord user: {interaction.user} (id={interaction.user.id}). Command: /{cmd_name}"
+                ),
+                on_progress=on_progress,
+                force_agent=force_agent,
+                secret_literals=self._secret_literals(),
+            )
+            via_feedback = guard.use_feedback
+            guard.stop()
+            if via_feedback:
+                await self._deliver_slash_feedback(
+                    interaction,
+                    title=f"Ultron · /{cmd_name} · {host_key}",
+                    body=result.body,
+                    via_feedback=True,
+                )
+            else:
+                parts = chunk_discord(result.body)
+                await _edit_or_followup(interaction, parts[0], ephemeral=False)
+                for part in parts[1:]:
+                    await interaction.followup.send(part[:_DISCORD_MSG_MAX], ephemeral=False)
+            log_slash_output(
+                cmd_name,
+                interaction,
+                action="delivered amvara reply",
+                fields=f"host={host_key!r} agent={result.agent.value} ok={result.ok} via_feedback={via_feedback}",
+            )
+        except TimeoutError as e:
+            guard.stop()
+            await slash_error(
+                f"**Timed out**\n{e}\nTry a narrower task or raise **amvara.audit.timeout_seconds**."
+            )
+            log_slash_error(cmd_name, interaction, action="timeout", detail=e)
+        except RuntimeError as e:
+            guard.stop()
+            await slash_error(str(e))
+            log_slash_error(cmd_name, interaction, action="runtime error", detail=e)
+        except ValueError as e:
+            guard.stop()
+            await slash_error(str(e))
+            log_slash_error(cmd_name, interaction, action="validation error", detail=e)
+        except Exception as e:
+            guard.stop()
+            _log_slash_command_failure(cmd_name, e)
+            await slash_error(f"**Error**\n{type(e).__name__}: {e}")
+
+    def _register_slash_amvara(self) -> None:
+        bot = self
+
+        async def ac_host(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+            cur = (current or "").casefold()
+            hosts = bot.amvara_registry.list_allowed_hosts()
+            matches = [h for h in hosts if not cur or h.startswith(cur)]
+            return [app_commands.Choice(name=h, value=h) for h in matches[:25]]
+
+        @self.tree.command(
+            name="audit",
+            description="Run an Amvara server audit (pi, cursor-agent fallback)",
+        )
+        @app_commands.describe(host="Allowlisted Amvara host", text="What to check or investigate")
+        @app_commands.autocomplete(host=ac_host)
+        async def audit_cmd(interaction: discord.Interaction, host: str, text: str) -> None:
+            await bot._run_slash_amvara(
+                interaction,
+                host=host,
+                text=text,
+                force_agent=None,
+                cmd_name="audit",
+            )
+
+        @self.tree.command(
+            name="ca",
+            description="Run an Amvara server audit with cursor-agent only",
+        )
+        @app_commands.describe(host="Allowlisted Amvara host", text="What to check or investigate")
+        @app_commands.autocomplete(host=ac_host)
+        async def ca_cmd(interaction: discord.Interaction, host: str, text: str) -> None:
+            await bot._run_slash_amvara(
+                interaction,
+                host=host,
+                text=text,
+                force_agent=AuditAgent.CURSOR_AGENT,
+                cmd_name="ca",
+            )
+
+        logger.info(
+            "Registered /audit and /ca slash commands | allowed_hosts=%s",
+            len(self.amvara_registry.list_allowed_hosts()),
+            extra=_STARTUP_LOG_EXTRA,
+        )
+
     def _register_slash_summary_ask_note(self) -> None:
         need_prov, need_model = self._slash_register_llm_extras()
         prov_desc = self._slash_desc_llm_provider()
@@ -2508,6 +3391,105 @@ class UltronBot(commands.Bot):
             extra=_STARTUP_LOG_EXTRA,
         )
 
+    def _register_slash_ol(self) -> None:
+        need_prov, need_model = self._slash_register_llm_extras()
+        prov_desc = self._slash_desc_llm_provider()
+        model_desc = self._slash_desc_llm_model()
+        bot = self
+
+        async def ac_prov(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+            return await bot._slash_ac_llm_provider(interaction, current)
+
+        async def ac_model(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+            return await bot._slash_ac_llm_model(interaction, current)
+
+        ol_desc = (
+            "Ask the configured local model (Ollama when in llm_chain) for technical or general advice"
+        )
+
+        if not need_prov and not need_model:
+
+            @self.tree.command(name="ol", description=ol_desc)
+            @app_commands.describe(text="Question or task for the advisor")
+            async def ol_cmd(interaction: discord.Interaction, text: str) -> None:
+                await bot._run_slash_ol(
+                    interaction,
+                    text,
+                    llm_provider=None,
+                    llm_model=None,
+                    cmd_need_prov=False,
+                    cmd_need_model=False,
+                )
+
+        elif not need_prov and need_model:
+
+            @self.tree.command(name="ol", description=ol_desc)
+            @app_commands.describe(text="Question or task for the advisor", llm_model=model_desc)
+            @app_commands.autocomplete(llm_model=ac_model)
+            async def ol_cmd(
+                interaction: discord.Interaction,
+                text: str,
+                llm_model: str | None = None,
+            ) -> None:
+                await bot._run_slash_ol(
+                    interaction,
+                    text,
+                    llm_provider=None,
+                    llm_model=llm_model,
+                    cmd_need_prov=False,
+                    cmd_need_model=True,
+                )
+
+        elif need_prov and not need_model:
+
+            @self.tree.command(name="ol", description=ol_desc)
+            @app_commands.describe(text="Question or task for the advisor", llm_provider=prov_desc)
+            @app_commands.autocomplete(llm_provider=ac_prov)
+            async def ol_cmd(
+                interaction: discord.Interaction,
+                text: str,
+                llm_provider: str | None = None,
+            ) -> None:
+                await bot._run_slash_ol(
+                    interaction,
+                    text,
+                    llm_provider=llm_provider,
+                    llm_model=None,
+                    cmd_need_prov=True,
+                    cmd_need_model=False,
+                )
+
+        else:
+
+            @self.tree.command(name="ol", description=ol_desc)
+            @app_commands.describe(
+                text="Question or task for the advisor",
+                llm_provider=prov_desc,
+                llm_model=model_desc,
+            )
+            @app_commands.autocomplete(llm_provider=ac_prov, llm_model=ac_model)
+            async def ol_cmd(
+                interaction: discord.Interaction,
+                text: str,
+                llm_provider: str | None = None,
+                llm_model: str | None = None,
+            ) -> None:
+                await bot._run_slash_ol(
+                    interaction,
+                    text,
+                    llm_provider=llm_provider,
+                    llm_model=llm_model,
+                    cmd_need_prov=True,
+                    cmd_need_model=True,
+                )
+
+        logger.info(
+            "Registered /ol slash command | need_llm_provider_option=%s need_llm_model_option=%s",
+            need_prov,
+            need_model,
+            extra=_STARTUP_LOG_EXTRA,
+        )
+
     async def setup_hook(self) -> None:
         guild = discord.Object(id=self.env.discord_guild_id) if self.env.discord_guild_id else None
 
@@ -2654,7 +3636,7 @@ class UltronBot(commands.Bot):
             ]
         )
         async def rpsls_cmd(interaction: discord.Interaction, move: str) -> None:
-            ephemeral = self.app_cfg.discord.ephemeral_default
+            ephemeral = True  # always private (game); unlike most slash replies
             log_slash_input("rpsls", interaction, fields=f"ephemeral={ephemeral} move={move!r}")
             await interaction.response.defer(ephemeral=ephemeral, thinking=True)
             await asyncio.sleep(random.uniform(0.8, 2.0))
@@ -2968,13 +3950,13 @@ class UltronBot(commands.Bot):
         async def help_cmd(interaction: discord.Interaction) -> None:
             log_slash_input("help", interaction)
             parts = chunk_discord(_HELP_TEXT)
-            await interaction.response.send_message(parts[0][: _DISCORD_MSG_MAX], ephemeral=True)
+            await interaction.response.send_message(parts[0][: _DISCORD_MSG_MAX], ephemeral=False)
             for part in parts[1:]:
-                await interaction.followup.send(part[:_DISCORD_MSG_MAX], ephemeral=True)
+                await interaction.followup.send(part[:_DISCORD_MSG_MAX], ephemeral=False)
             log_slash_output(
                 "help",
                 interaction,
-                action="sent help text (ephemeral)",
+                action="sent help text (public)",
                 fields=f"chunks={len(parts)}",
             )
 
@@ -3083,7 +4065,75 @@ class UltronBot(commands.Bot):
                 await interaction.followup.send(part, ephemeral=True)
             log_slash_output("show_config", interaction, action="sent ephemeral config summary")
 
+        @self.tree.command(
+            name="pi",
+            description="Run pi + Ollama on the Ultron checkout (admins only; file/shell access)",
+        )
+        @app_commands.describe(text="Task or question for the pi coding agent")
+        async def pi_cmd(interaction: discord.Interaction, text: str) -> None:
+            await self._run_slash_pi(interaction, text)
+
+        @self.tree.command(
+            name="upgrade",
+            description="Improve or repair Ultron code with cursor-agent (verified restart on success)",
+        )
+        @app_commands.describe(text="What to change or add (e.g. a new slash command that …)")
+        async def upgrade_cmd(interaction: discord.Interaction, text: str) -> None:
+            log_slash_input("upgrade", interaction, fields=f"text_len={len(text)}")
+            task = text.strip()
+            if not task:
+                await interaction.response.send_message(
+                    "Provide a **text** argument describing the code improvement.",
+                    ephemeral=True,
+                )
+                log_slash_output("upgrade", interaction, action="rejected (empty text)")
+                return
+            if self._self_upgrade_active:
+                await interaction.response.send_message(
+                    "A self-upgrade or self-repair is already in progress.",
+                    ephemeral=True,
+                )
+                log_slash_output("upgrade", interaction, action="rejected (busy)")
+                return
+            if not self.app_cfg.cursor_agent.enabled:
+                await interaction.response.send_message(
+                    "**cursor-agent** is disabled. Enable **cursor_agent.enabled** in `config.yaml`.",
+                    ephemeral=True,
+                )
+                log_slash_output("upgrade", interaction, action="rejected (cursor-agent disabled)")
+                return
+            self._self_upgrade_active = True
+            guard = DeferredInteractionGuard(interaction)
+            try:
+                await interaction.response.defer(ephemeral=False, thinking=True)
+                await guard.start()
+                trigger = SelfUpgradeTrigger(mode=SelfUpgradeMode.OPERATOR, request=task)
+                await run_self_upgrade(
+                    self,
+                    self.env,
+                    self.app_cfg,
+                    trigger,
+                    interaction=interaction,
+                    defer_interaction=False,
+                    secret_literals=self._secret_literals(),
+                )
+                log_slash_output("upgrade", interaction, action="finished")
+            except Exception as e:
+                guard.stop()
+                _log_slash_command_failure("upgrade", e)
+                await self._deliver_slash_feedback(
+                    interaction,
+                    title="Ultron · /upgrade failed",
+                    body=f"{type(e).__name__}: {e}",
+                    via_feedback=guard.use_feedback,
+                )
+            finally:
+                guard.stop()
+                self._self_upgrade_active = False
+
         self._register_slash_summary_ask_note()
+        self._register_slash_ol()
+        self._register_slash_amvara()
 
         if guild:
             self.tree.copy_global_to(guild=guild)
@@ -3138,15 +4188,22 @@ class UltronBot(commands.Bot):
             self._ready_at_utc = datetime.now(timezone.utc)
         on_ready_ex = _STARTUP_LOG_EXTRA if first_ready else {}
         logger.info(
-            "Logged in as %s (%s)",
+            "Logged in as %s (%s) | Ultron v%s",
             self.user,
             self.user.id if self.user else "",
+            _ULTRON_VERSION,
             extra=on_ready_ex,
         )
         try:
-            await self.change_presence(status=discord.Status.online)
+            await self.change_presence(
+                activity=discord.Activity(
+                    type=discord.ActivityType.watching,
+                    name=f"v{_ULTRON_VERSION}",
+                ),
+                status=discord.Status.online,
+            )
         except discord.HTTPException as e:
-            logger.warning("change_presence(online) failed: %s", e, extra=on_ready_ex)
+            logger.warning("change_presence failed: %s", e, extra=on_ready_ex)
         if not self.env.llm_enabled:
             logger.info(
                 "No language model assigned — /summary, /ask_issue, and /note are disabled; "

@@ -59,3 +59,11 @@ def test_parse_router_log_time_accepts_string_hours() -> None:
     out = parse_router_json_text(raw)
     assert isinstance(out, NLInvoke)
     assert out.args == {"issue_id": 3, "hours": 2.25}
+
+
+def test_parse_router_invoke_ol() -> None:
+    raw = '{"kind":"invoke","command":"ol","args":{"text":"How do I restart Ultron under systemd?"}}'
+    out = parse_router_json_text(raw)
+    assert isinstance(out, NLInvoke)
+    assert out.command == "ol"
+    assert out.args == {"text": "How do I restart Ultron under systemd?"}

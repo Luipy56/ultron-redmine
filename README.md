@@ -111,10 +111,11 @@ During the wizard: **Y** / **N** / **r** (see the hint next to each prompt; **r*
 | `/list_unassigned_issues` | Allowlisted — **unassigned** issues still **open** in Redmine, created at least **N** day(s) ago, excluding status names that match configured **closed-equivalent prefixes** (`discord.unassigned_open` in `config.yaml`); first chunk as an embed |
 | `/time_summary` `user` | Allowlisted — Redmine **spent hours** for a user (**today**, **this week** Mon–today, **last 7 days** by `spent_on`, **last 24 h** by `created_on`). `user` = Redmine login, numeric id, or **`me`**. Optional **`redmine.user_id_by_login`** in `config.yaml` if login API lookup is denied |
 | `/log_time` | Allowlisted — logs **spent hours** on an issue (as the **Redmine API key** user); optional **comments** and **spent_on** (YYYY-MM-DD). Optional **`REDMINE_TIME_ACTIVITY_ID`** in `.env` when your instance has several time-entry activities |
-| `/summary`, `/ask_issue`, `/note` | Allowlisted — require a **configured LLM** |
-| `@Ultron` (mention or reply) | Allowlisted — LLM router when NL routing is enabled and an LLM is configured; otherwise a short notice. **Message Content Intent** may be required in some setups. |
+| `/summary`, `/ask_issue`, `/note`, `/ol` | Allowlisted — require a **configured LLM**; **`/ol`** asks the local advisor (prefers Ollama in **llm_chain**) for technical or general Q&A |
+| `/audit`, `/ca` | Allowlisted — Amvara server audits (pi + cursor-agent fallback, or cursor-agent only for **`/ca`**) |
+| `@Ultron` (mention or reply) | Allowlisted — LLM router when NL routing is enabled and an LLM is configured; Amvara audits and compound tasks when **`amvara.allowed_hosts`** is set; otherwise a short notice. **Message Content Intent** may be required in some setups. |
 | `/token` (DM) | Request an onboarding code |
-| `/approve`, `/remove`, `/show_config` | Admins (`DISCORD_ADMIN_IDS` or `admins.json`); `/show_config` shows non-secret settings (ephemeral) |
+| `/approve`, `/remove`, `/show_config`, `/pi`, `/upgrade` | Admins (`DISCORD_ADMIN_IDS` or `admins.json`); **`/pi`** runs pi.dev + Ollama on the checkout; **`/upgrade`** runs cursor-agent self-improvement with verified restart; **`/show_config`** shows non-secret settings (ephemeral) |
 
 Typical access flow: user runs **`/token` in a DM** → an admin runs **`/approve`** with that token (or on the host: `ultron add token '<token>'`).
 
@@ -167,6 +168,11 @@ Copy **[`config.example.yaml`](config.example.yaml)** → `config.yaml`. **Every
 - **`/summary issue_id`** — Loads the ticket (description + recent journals), sends context to the LLM, returns a summary. **Requires a whitelisted Discord user id** and a **configured language model** (otherwise the bot replies with setup instructions). Optional **`llm_provider`** / **`llm_model`** when a model is configured; see [LLM setup](#llm-setup) and **`discord.slash_show_llm_option_hints`** in [`config.example.yaml`](config.example.yaml).
 - **`/ask_issue issue_id question`** — Loads the same ticket context as **`/summary`**, sends it with **`question`** to the LLM, and returns an answer grounded in the ticket text. **Requires a whitelisted user id** and a **configured model**. Same optional LLM options as **`/summary`**.
 - **`/note issue_id text`** — Confirms the ticket exists, asks the LLM to polish the text, then appends it as a Redmine journal note. **Requires a whitelisted user id** and a **configured model**. Same optional LLM options as **`/summary`**.
+- **`/ol text`** — Asks the configured local model (defaults to the first **Ollama-like** **llm_chain** entry) for technical or general advice about Redmine, Ultron, Linux ops, or open-ended questions. **Advisory only** — no shell or file access. **Requires a whitelisted user id** and a **configured model**. Optional **`llm_provider`** / **`llm_model`** like other LLM slash commands.
+- **`/audit host text`** — **Whitelisted.** Runs an **Amvara server audit** on an allowlisted host (pi with cursor-agent fallback). Agents run on the Ultron host; remote work uses SSH aliases from `~/.ssh/config`. Configure **`amvara.allowed_hosts`** in `config.yaml`.
+- **`/ca host text`** — Same as **`/audit`** but **cursor-agent only** (no pi fallback).
+- **`/pi text`** — **Admins only.** Runs **pi** (pi.dev) with **Ollama** on the Ultron checkout: can read/edit files and run shell commands in that workspace. Requires **`npm install`** (`@earendil-works/pi-coding-agent`) and an Ollama **`llm_chain`** entry. Configure under **`pi:`** in `config.yaml` (see **`config.example.yaml`**).
+- **`/upgrade text`** — **Admins only.** Runs **cursor-agent** to improve or repair the Ultron codebase; verifies `pip install -e .` + imports, then **`systemctl restart --no-block`**. Reports go to **`reports.channel_id`**. Requires **`cursor_agent.enabled`**.
 - **`/list_new_issues`** — Lists Redmine issues whose status matches **`discord.new_issues.status_name`**, created at least **`discord.new_issues.min_age_days`** ago (see `config.yaml`). **Requires a whitelisted user id.**
 - **`/issues_by_status` `status`** — Same output rules as **`/list_new_issues`**, but **`status`** is the Redmine issue status name for this run (min age and list limit still come from **`discord.new_issues`**). **Requires a whitelisted user id.**
 - **`/list_unassigned_issues`** — Lists **unassigned** Redmine issues that are still **open** (`status_id=open`), created at least **`discord.unassigned_open.min_age_days`** ago (default **1**), excluding any current status whose name **equals or starts with** a string in **`discord.unassigned_open.closed_status_prefixes`** (case-insensitive; e.g. `Solved` matches `Solved STAGE`). List length is capped by **`discord.unassigned_open.list_limit`**. **Requires a whitelisted user id.** The first chunk is sent as an **embed**; the rest as plain messages.
@@ -179,11 +185,11 @@ Copy **[`config.example.yaml`](config.example.yaml)** → `config.yaml`. **Every
 
 ### Access control (whitelist)
 
-Only Discord user ids stored in `whitelist.json` (under `ULTRON_STATE_DIR`, default `./data`) may use **`/summary`**, **`/ask_issue`**, **`/note`**, **`/list_new_issues`**, **`/issues_by_status`**, **`/list_unassigned_issues`**, **`/time_summary`**, **`/log_time`**, and **@mention** replies. That directory is listed in `.gitignore`; keep it on the server only.
+Only Discord user ids stored in `whitelist.json` (under `ULTRON_STATE_DIR`, default `./data`) may use **`/summary`**, **`/ask_issue`**, **`/note`**, **`/ol`**, **`/audit`**, **`/ca`**, **`/list_new_issues`**, **`/issues_by_status`**, **`/list_unassigned_issues`**, **`/time_summary`**, **`/log_time`**, and **@mention** replies. That directory is listed in `.gitignore`; keep it on the server only.
 
 ### Bot admins
 
-Admins may use **`/approve`** to whitelist users, **`/remove`** to drop a user id from the whitelist, and **`/show_config`** to inspect safe settings, without shell access. An admin is any Discord user id in **`DISCORD_ADMIN_IDS`** and/or **`admins.json`** (same directory as `whitelist.json`, same JSON array-of-integers format as the whitelist). Use the env var for the first admin(s), or create `admins.json` on the server by hand. **Use each user’s numeric Discord id (Developer Mode → copy id);** usernames, display names, or nicknames are not accepted—if `admins.json` contains only invalid entries, no one is an admin except ids in **`DISCORD_ADMIN_IDS`**.
+Admins may use **`/approve`** to whitelist users, **`/remove`** to drop a user id from the whitelist, **`/show_config`** to inspect safe settings, **`/pi`** to run the pi coding agent on the Ultron checkout, and **`/upgrade`** to run cursor-agent self-improvement with verified restart. An admin is any Discord user id in **`DISCORD_ADMIN_IDS`** and/or **`admins.json`** (same directory as `whitelist.json`, same JSON array-of-integers format as the whitelist). Use the env var for the first admin(s), or create `admins.json` on the server by hand. **Use each user’s numeric Discord id (Developer Mode → copy id);** usernames, display names, or nicknames are not accepted—if `admins.json` contains only invalid entries, no one is an admin except ids in **`DISCORD_ADMIN_IDS`**.
 
 **Bootstrap for a new user**
 
@@ -197,7 +203,7 @@ Admins may use **`/approve`** to whitelist users, **`/remove`** to drop a user i
 
 4. The user may still need the **bot owner** to OK access organizationally; the bot mentions this in DMs when access is denied.
 
-If a non-whitelisted user invokes **`/summary`**, **`/ask_issue`**, **`/note`**, **`/list_new_issues`**, **`/issues_by_status`**, **`/list_unassigned_issues`**, **`/time_summary`**, or **`/log_time`** in a **server channel**, Ultron removes the visible reply so others see nothing. In **DM**, they get a short English message about **`/token`**, asking a bot admin, and contacting the owner. Optional **`BOT_OWNER_CONTACT`** is appended when set.
+If a non-whitelisted user invokes **`/summary`**, **`/ask_issue`**, **`/note`**, **`/ol`**, **`/list_new_issues`**, **`/issues_by_status`**, **`/list_unassigned_issues`**, **`/time_summary`**, or **`/log_time`** in a **server channel**, Ultron removes the visible reply so others see nothing. In **DM**, they get a short English message about **`/token`**, asking a bot admin, and contacting the owner. Optional **`BOT_OWNER_CONTACT`** is appended when set.
 
 ### Long notes (Discord limit)
 
