@@ -7,11 +7,15 @@
 # Usage:
 #   ./scripts/ultron-dump.sh
 #   ULTRON_SYSTEMD_UNIT=ultron.service ./scripts/ultron-dump.sh
+#   ULTRON_DUMP_SKIP_RESTART=1 ./scripts/ultron-dump.sh   # pip/npm only (Discord /upgrade)
+#   ULTRON_DUMP_RESTART_NO_BLOCK=1 ./scripts/ultron-dump.sh
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 UNIT="${ULTRON_SYSTEMD_UNIT:-ultron.service}"
+SKIP_RESTART="${ULTRON_DUMP_SKIP_RESTART:-0}"
+NO_BLOCK="${ULTRON_DUMP_RESTART_NO_BLOCK:-0}"
 
 cd "${ROOT}"
 
@@ -21,6 +25,18 @@ echo "ultron-dump: pip install -e ."
 if [[ -f "${ROOT}/package.json" ]] && command -v npm >/dev/null 2>&1; then
   echo "ultron-dump: npm install (pi-coding-agent)"
   (cd "${ROOT}" && npm install --ignore-scripts --silent)
+fi
+
+if [[ "$SKIP_RESTART" == "1" ]]; then
+  echo "ultron-dump: OK — install done (restart skipped; caller will restart)"
+  exit 0
+fi
+
+if [[ "$NO_BLOCK" == "1" ]]; then
+  echo "ultron-dump: systemctl restart --no-block ${UNIT}"
+  systemctl restart --no-block "${UNIT}"
+  echo "ultron-dump: OK — restart requested (no-block); caller should exit"
+  exit 0
 fi
 
 echo "ultron-dump: systemctl restart ${UNIT}"

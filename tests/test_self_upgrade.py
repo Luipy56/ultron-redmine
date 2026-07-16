@@ -90,3 +90,52 @@ def test_request_systemd_restart() -> None:
     mock_popen.assert_called_once()
     args = mock_popen.call_args[0][0]
     assert args[0:3] == ["systemctl", "restart", "--no-block"]
+
+
+def test_create_upgrade_feat_task(tmp_path) -> None:
+    from ultron.settings import EnvSettings
+    from ultron.config import EnvironmentBindings
+    from ultron.self_upgrade import create_upgrade_feat_task, SelfUpgradeMode
+
+    root = tmp_path / "repo"
+    (root / "autoagents" / "tasks").mkdir(parents=True)
+    env = EnvSettings(
+        discord_token="x",
+        discord_guild_id=None,
+        discord_application_id=None,
+        redmine_url="https://redmine.example",
+        redmine_api_key="k",
+        llm_enabled=False,
+        llm_base_url="",
+        llm_api_key="",
+        llm_model="(none)",
+        config_path="config.yaml",
+        state_dir=tmp_path / "state",
+        bot_owner_contact=None,
+        discord_admin_ids=frozenset(),
+        discord_message_content_intent=False,
+        ultron_nl_commands=False,
+        environment_bindings=EnvironmentBindings(),
+        ultron_project_root=root,
+        self_upgrade_prompt_path=None,
+        self_upgrade_timeout_seconds=1800,
+        self_repair_enabled=True,
+        systemd_unit="ultron.service",
+    )
+    path = create_upgrade_feat_task(
+        env,
+        request="Add a /ping latency field",
+        mode=SelfUpgradeMode.OPERATOR,
+        issue_id=7406,
+    )
+    assert path.name.startswith("FEAT-7406-")
+    text = path.read_text(encoding="utf-8")
+    assert "#7406" in text
+    assert "Add a /ping latency field" in text
+
+
+def test_upgrade_redmine_issue_id_default() -> None:
+    from ultron.self_upgrade import DEFAULT_UPGRADE_REDMINE_ISSUE_ID, upgrade_redmine_issue_id
+
+    assert upgrade_redmine_issue_id() == DEFAULT_UPGRADE_REDMINE_ISSUE_ID
+    assert DEFAULT_UPGRADE_REDMINE_ISSUE_ID == 7406

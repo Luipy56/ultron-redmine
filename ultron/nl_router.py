@@ -83,6 +83,7 @@ Rules:
 - If they want to log spent time / hours on a ticket, use log_time with hours (not minutes unless they specify hours as a decimal).
 - If they want general technical advice, Linux/Redmine/Ultron help, or a conceptual question (not tied to a ticket), use ol with text.
 - If they want a list of new/old/unassigned issues, pick the matching list command.
+- The user message may include a replied-to Discord excerpt above a `---` separator. Treat deictic references (this, esto, all this, the above) as referring to that excerpt. Do not ask for clarification when the excerpt supplies the missing content.
 - If you are unsure, use kind chat with a brief clarification question.
 - NEVER output approve, remove, show_config, or token — those are not available here.
 """

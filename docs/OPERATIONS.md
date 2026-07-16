@@ -164,6 +164,17 @@ Agent logs: **`data/self-upgrade/`** under **`ULTRON_STATE_DIR`**.
 - **Startup:** Log lines include Redmine OK / LLM backend (or none). Optional line to `registration_log` when enabled.
 - **Smoke script (no Discord):** [`scripts/smoke_check.py`](../scripts/smoke_check.py) — optional Redmine/LLM connectivity from `.env`.
 
+## Autoagents loop (optional)
+
+Background **cursor-agent** pipeline for queued work on the Ultron codebase: Redmine/GitHub intake, coding, testing, archive, and commit on **`main`**. See **[agent-loop.md](agent-loop.md)** and **`autoagents/TASKS-README.md`**.
+
+```bash
+./autoagents/ultron-agent-loop.sh help    # single steps: intake, coder, tester, shot, …
+./autoagents/ultron-agent-loop.sh         # full cycle loop (requires cursor-agent)
+```
+
+Preflight scripts under **`scripts/`** (`redmine-reviewer-preflight.sh`, `enhancement-reviewer-preflight.sh`) write digests under `$TMPDIR/ultron-agent-loop/`. Discord **`/upgrade`** creates a FEAT and runs **`shot`**, then dump + Redmine **#7406** note + restart (not a full loop).
+
 ## Related documentation
 
 - [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) — what to verify before tagging a release.

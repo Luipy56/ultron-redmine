@@ -20,6 +20,14 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 from ultron import __version__ as _ULTRON_VERSION
 from ultron.discord_format import embed_issue_list_intro, embed_time_summary
+from ultron.discord_reply_context import (
+    ReplyContext,
+    build_effective_user_text,
+    format_reply_context_for_prompt,
+    resolve_note_body,
+    resolve_reply_context,
+    strip_discord_mentions,
+)
 from ultron.discord_interaction_errors import is_unknown_interaction_error
 from ultron.discord_slash import DeferredInteractionGuard, edit_or_followup
 from ultron.feedback import FeedbackReport, send_feedback
@@ -330,7 +338,7 @@ Without **llm_chain**, `/summary`, `/ask_issue`, `/note`, and `/ol` are unavaila
 
 **Bot admins only**
 • `/pi` `text` — Run **pi** with Ollama on the Ultron checkout (file/shell access in workspace). Requires `npm install` + Ollama in **llm_chain**.
-• `/upgrade` `text` — Improve or repair Ultron code with **cursor-agent** (verified restart on success). Reports go to the reports channel.
+• `/upgrade` `text` — Queue a **FEAT** in **autoagents**, run one shot (implement → test), **dump**, report to Redmine **#7406**, and restart. Reports also go to the reports channel.
 • `/approve` `token` — Approve a `/token` code.
 • `/remove` `user_id` — Remove from the whitelist.
 • `/show_config` — Non-secret settings (**ephemeral**)."""
@@ -1454,9 +1462,9 @@ class UltronBot(commands.Bot):
 
     async def _handle_nl_chat_message(self, message: discord.Message, via: str) -> None:
         """Prefilter → Amvara audit, compound planner, or LLM router (whitelist already checked)."""
-        user_text = (message.content or "").strip()
-        preview = _truncate_for_log(user_text)
-        pre = classify_message(user_text)
+        raw_user_text = strip_discord_mentions((message.content or "").strip())
+        preview = _truncate_for_log(raw_user_text)
+        pre = classify_message(raw_user_text)
         log_chat_mention_input(
             message,
             fields=(
@@ -1477,14 +1485,44 @@ class UltronBot(commands.Bot):
                 feature="nl_router",
             )
 
+        reply_ctx = await resolve_reply_context(message)
+        reply_block = format_reply_context_for_prompt(reply_ctx)
+        if reply_block:
+            log_chat_mention_input(
+                message,
+                fields=f"reply_context_chars={len(reply_block)}",
+                feature="nl_router",
+            )
+
+        effective_user_text = build_effective_user_text(raw_user_text, reply_block)
+
         if pre.intent == MessageIntent.AMVARA_ONLY:
-            await self._run_nl_amvara_only(message, user_text, pre, status_message=status_msg, via=via)
+            await self._run_nl_amvara_only(
+                message,
+                effective_user_text,
+                pre,
+                status_message=status_msg,
+                via=via,
+            )
             return
         if pre.intent == MessageIntent.COMPOUND:
-            await self._run_nl_compound(message, user_text, pre, status_message=status_msg, via=via)
+            await self._run_nl_compound(
+                message,
+                effective_user_text,
+                pre,
+                status_message=status_msg,
+                via=via,
+                reply_ctx=reply_ctx,
+            )
             return
 
-        await self._run_nl_redmine_router(message, user_text, status_message=status_msg, via=via)
+        await self._run_nl_redmine_router(
+            message,
+            effective_user_text,
+            status_message=status_msg,
+            via=via,
+            reply_ctx=reply_ctx,
+        )
 
     async def _run_nl_redmine_router(
         self,
@@ -1493,11 +1531,16 @@ class UltronBot(commands.Bot):
         *,
         status_message: discord.Message | None,
         via: str,
+        reply_ctx: ReplyContext | None = None,
     ) -> None:
         """Existing single-shot NL router (Redmine-only or general)."""
         t0 = time.monotonic()
         try:
-            outcome = await run_nl_router(self.llm, user_text=user_text, via=via)
+            outcome = await run_nl_router(
+                self.llm,
+                user_text=user_text,
+                via=via,
+            )
         except NoLLMConfiguredError:
             await _nl_edit_or_reply(message, status_message, _NO_LLM_SLASH_MSG)
             log_chat_mention_output(message, action="routed (no LLM at runtime)", feature="nl_router")
@@ -1553,7 +1596,12 @@ class UltronBot(commands.Bot):
             elapsed,
             extra={"chat_phase": "ROUTER", "message_source": "chat"},
         )
-        await self._dispatch_nl_router_outcome(message, outcome, status_message=status_message)
+        await self._dispatch_nl_router_outcome(
+            message,
+            outcome,
+            status_message=status_message,
+            reply_ctx=reply_ctx,
+        )
 
     async def _dispatch_nl_router_outcome(
         self,
@@ -1561,6 +1609,7 @@ class UltronBot(commands.Bot):
         outcome: NLAdminRejected | NLParseError | NLChat | NLInvoke,
         *,
         status_message: discord.Message | None,
+        reply_ctx: ReplyContext | None = None,
     ) -> None:
         if isinstance(outcome, NLAdminRejected):
             logger.warning(
@@ -1618,7 +1667,12 @@ class UltronBot(commands.Bot):
                 _truncate_for_log(dispatch_line, 160),
                 extra={"chat_phase": "ROUTER", "message_source": "chat"},
             )
-            await self._run_nl_invoke(message, outcome, status_message=status_message)
+            await self._run_nl_invoke(
+                message,
+                outcome,
+                status_message=status_message,
+                reply_ctx=reply_ctx,
+            )
             log_chat_mention_output(
                 message,
                 action="invoke completed",
@@ -1683,6 +1737,7 @@ class UltronBot(commands.Bot):
         *,
         status_message: discord.Message | None,
         via: str,
+        reply_ctx: ReplyContext | None = None,
     ) -> None:
         if not self.env.llm_enabled:
             await _nl_edit_or_reply(message, status_message, _NO_LLM_SLASH_MSG)
@@ -1736,7 +1791,13 @@ class UltronBot(commands.Bot):
             await _reply_chunked_to_message(message, outcome.message, edit_first=status_message)
             return
         if isinstance(outcome, NLPlan):
-            await self._run_nl_plan(message, outcome, status_message=status_message, via=via)
+            await self._run_nl_plan(
+                message,
+                outcome,
+                status_message=status_message,
+                via=via,
+                reply_ctx=reply_ctx,
+            )
 
     async def _run_nl_plan(
         self,
@@ -1745,6 +1806,7 @@ class UltronBot(commands.Bot):
         *,
         status_message: discord.Message | None,
         via: str,
+        reply_ctx: ReplyContext | None = None,
     ) -> None:
         last_audit_body = ""
         n = len(plan.steps)
@@ -1770,11 +1832,12 @@ class UltronBot(commands.Bot):
                         except discord.HTTPException:
                             pass
 
+                    audit_task = step.task
                     result = await run_amvara_audit(
                         app_cfg=self.app_cfg,
                         registry=self.amvara_registry,
                         host_name=step.host,
-                        task=step.task,
+                        task=audit_task,
                         state_dir=self.env.state_dir,
                         session_context=(
                             f"Discord user: {message.author} (id={message.author.id}). "
@@ -1835,7 +1898,12 @@ class UltronBot(commands.Bot):
                         await status_message.edit(content=line)
                 except discord.HTTPException:
                     pass
-                await self._run_nl_invoke(message, inv, status_message=status_message)
+                await self._run_nl_invoke(
+                    message,
+                    inv,
+                    status_message=status_message,
+                    reply_ctx=reply_ctx,
+                )
 
     async def _deliver_amvara_audit_reply(
         self,
@@ -1907,6 +1975,7 @@ class UltronBot(commands.Bot):
         inv: NLInvoke,
         *,
         status_message: discord.Message | None = None,
+        reply_ctx: ReplyContext | None = None,
     ) -> None:
         """Execute a validated non-admin command from the NL router."""
         cmd = inv.command
@@ -2053,7 +2122,7 @@ class UltronBot(commands.Bot):
                 return
             if cmd == "note":
                 issue_id = int(args["issue_id"])
-                raw = str(args["text"])
+                raw = resolve_note_body(str(args["text"]), reply_ctx)
                 posted, url = await add_formatted_note(
                     redmine=self.redmine,
                     llm=self.llm,
@@ -2781,6 +2850,8 @@ class UltronBot(commands.Bot):
                 interaction=interaction,
                 ephemeral=ephemeral,
                 template=self.app_cfg.discord.llm_chain_skip_status,
+                command="ol",
+                issue_id=0,
             )
 
             async def on_progress(phase: str) -> None:
@@ -4075,7 +4146,7 @@ class UltronBot(commands.Bot):
 
         @self.tree.command(
             name="upgrade",
-            description="Improve or repair Ultron code with cursor-agent (verified restart on success)",
+            description="Improve Ultron via autoagents FEAT shot + dump; report Redmine #7406",
         )
         @app_commands.describe(text="What to change or add (e.g. a new slash command that …)")
         async def upgrade_cmd(interaction: discord.Interaction, text: str) -> None:
@@ -4097,7 +4168,8 @@ class UltronBot(commands.Bot):
                 return
             if not self.app_cfg.cursor_agent.enabled:
                 await interaction.response.send_message(
-                    "**cursor-agent** is disabled. Enable **cursor_agent.enabled** in `config.yaml`.",
+                    "**cursor-agent** is disabled (autoagents needs it). "
+                    "Enable **cursor_agent.enabled** in `config.yaml`.",
                     ephemeral=True,
                 )
                 log_slash_output("upgrade", interaction, action="rejected (cursor-agent disabled)")
