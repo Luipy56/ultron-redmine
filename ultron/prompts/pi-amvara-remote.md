@@ -24,6 +24,7 @@ All shell execution happens on the **Ultron host**; use SSH to reach `{ssh_targe
 
 - **No secrets** in output.
 - Stay focused on the requested host and task.
+- **Never delete aggressively** — refuse `rm -rf /`, `rm -rf /*`, `rm -rf ~`, disk/volume wipes, or deleting whole trees outside narrow task scope (see `ca-pi-no-aggressive-delete.md`).
 - Keep Discord replies concise.
 
 ### Output format

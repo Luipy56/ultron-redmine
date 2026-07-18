@@ -33,7 +33,7 @@ If you **@mention** the bot (or **reply** to one of its messages) in a channel o
 
 ## Whitelist vs bot admins
 
-- **Whitelist** — Users who may use Redmine-related slash commands (`/summary`, `/ask_issue`, `/note`, `/ol`, `/audit`, `/ca`, `/list_new_issues`, `/list_unassigned_issues`, etc.) as configured by your team.
+- **Whitelist** — Users who may use Redmine-related slash commands (`/summary`, `/ask_issue`, `/note`, `/ol`, `/audit`, `/ca`, `/list_new_issues`, `/list_unassigned_issues`, `/find_issue`, etc.) as configured by your team.
 - **Bot admins** — Users who may **`/approve`** and **`/remove`** whitelist entries. They are a smaller group.
 
 If a command says you are not allowed, follow your organization’s process (often **`/token`** + admin approval). Optional **`BOT_OWNER_CONTACT`** in the bot configuration may point you to who can help.

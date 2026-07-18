@@ -20,6 +20,10 @@ redmine:
   # Example: 2000
   time_summary_max_entries: null
 
+  # find_issue_project — Default Redmine project identifier (or numeric id) for /find_issue full-text search (subject, description, notes). Empty/null uses 10_AMVARA.
+  # Example: 10_AMVARA
+  find_issue_project: null
+
 discord:
   # ephemeral_default — If true, /summary, /ask_issue, /note default to ephemeral replies (only the user sees them). Null uses default true.
   # Example: true

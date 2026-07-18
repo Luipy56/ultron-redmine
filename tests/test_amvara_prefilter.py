@@ -32,3 +32,9 @@ def test_classify_compound() -> None:
 def test_classify_general() -> None:
     r = classify_message("hello there")
     assert r.intent == MessageIntent.GENERAL
+
+
+def test_classify_find_issue() -> None:
+    r = classify_message("find issue about sso login failure")
+    assert r.intent == MessageIntent.REDMINE_ONLY
+    assert r.has_redmine_signal

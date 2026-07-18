@@ -108,6 +108,8 @@ class RedmineConfig:
     user_id_by_login: dict[str, int] = field(default_factory=dict)
     #: Max time entries fetched for `/time_summary` (paginated, capped).
     time_summary_max_entries: int = 2000
+    #: Default Redmine project identifier (or numeric id) for `/find_issue` full-text search.
+    find_issue_project: str = "10_AMVARA"
 
 
 @dataclass(frozen=True)
@@ -677,7 +679,12 @@ def load_config(path: Path) -> AppConfig:
                 continue
             uid_map[lk] = int(v)
     tsm = max(50, min(5000, _int(rm_raw.get("time_summary_max_entries"), 2000)))
-    redmine_cfg = RedmineConfig(user_id_by_login=uid_map, time_summary_max_entries=tsm)
+    find_proj = _str(rm_raw.get("find_issue_project"), "10_AMVARA")
+    redmine_cfg = RedmineConfig(
+        user_id_by_login=uid_map,
+        time_summary_max_entries=tsm,
+        find_issue_project=find_proj,
+    )
 
     pi_raw = raw.get("pi") or {}
     if pi_raw is not None and not isinstance(pi_raw, dict):

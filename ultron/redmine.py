@@ -246,6 +246,84 @@ class RedmineClient:
     def issue_url(self, issue_id: int) -> str:
         return f"{self.base_url}/issues/{issue_id}"
 
+    async def search_issues(
+        self,
+        query: str,
+        *,
+        project_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Search issues in a project via Redmine ``GET /projects/{id}/search.json``.
+
+        Uses Redmine full-text search (subject, description, notes/journals, and other
+        indexed issue fields). Returns ``(results, total_count)`` where each result is a
+        search hit dict (``id``, ``title``, ``type``, …).
+        """
+        q = (query or "").strip()
+        if not q:
+            raise ValueError("search query must be non-empty")
+        proj = (project_id or "").strip()
+        if not proj:
+            raise ValueError("project_id must be non-empty")
+        lim = min(max(1, limit), 100)
+        off = max(0, offset)
+        path = f"/projects/{proj}/search.json"
+        params: dict[str, Any] = {
+            "q": q,
+            "issues": 1,
+            "limit": lim,
+            "offset": off,
+        }
+        async with self._client() as c:
+            r = await c.get(path, params=params)
+        if r.status_code == 404:
+            raise RedmineError(
+                f"Redmine project search failed (404): project {proj!r} not found or search unavailable"
+            )
+        if r.is_error:
+            raise RedmineError(f"Redmine search failed: {r.status_code} {r.text[:500]}")
+        data = r.json()
+        results = list(data.get("results") or [])
+        total_raw = data.get("total_count")
+        try:
+            total = int(total_raw) if total_raw is not None else len(results)
+        except (TypeError, ValueError):
+            total = len(results)
+        return results, max(0, total)
+
+    async def search_issues_collect(
+        self,
+        query: str,
+        *,
+        project_id: str,
+        max_results: int = 200,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Paginate ``search_issues`` up to ``max_results`` hits; return ``(hits, total_count)``."""
+        cap = max(1, min(max_results, 500))
+        out: list[dict[str, Any]] = []
+        offset = 0
+        total = 0
+        while len(out) < cap:
+            page, total = await self.search_issues(
+                query,
+                project_id=project_id,
+                limit=min(100, cap - len(out)),
+                offset=offset,
+            )
+            if not page:
+                break
+            for hit in page:
+                out.append(hit)
+                if len(out) >= cap:
+                    break
+            if len(page) < 100:
+                break
+            offset += len(page)
+            if offset >= total:
+                break
+        return out, total
+
     async def get_user(self, user_id: int) -> dict[str, Any]:
         async with self._client() as c:
             r = await c.get(f"/users/{user_id}.json")

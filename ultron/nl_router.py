@@ -20,10 +20,12 @@ NL_ALLOWED_COMMANDS: frozenset[str] = frozenset(
         "list_new_issues",
         "issues_by_status",
         "list_unassigned_issues",
+        "find_issue",
         "summary",
         "ask_issue",
         "note",
         "log_time",
+        "time_summary",
         "ol",
     }
 )
@@ -70,10 +72,12 @@ Allowed command names and args (only these):
 - list_new_issues — args {} (uses server config for which Redmine status)
 - issues_by_status — args {"status":"<exact Redmine status name string>"}
 - list_unassigned_issues — args {}
+- find_issue — args {"text":"<non-empty search hint>"} (Redmine full-text search in the default project)
 - summary — args {"issue_id": <positive integer>}
 - ask_issue — args {"issue_id": <int>, "question": "<non-empty string>"}
 - note — args {"issue_id": <int>, "text": "<non-empty note body>"}
 - log_time — args {"issue_id": <positive integer>, "hours": <positive number>}
+- time_summary — args {"user": "<Redmine login, numeric user id, or me>"}
 - ol — args {"text": "<non-empty question or task for the local advisor>"}
 
 Rules:
@@ -81,8 +85,10 @@ Rules:
 - If they ask a question about a ticket, use ask_issue.
 - If they want to add a note to a ticket, use note.
 - If they want to log spent time / hours on a ticket, use log_time with hours (not minutes unless they specify hours as a decimal).
+- If they ask how much time someone logged / spent hours for a user (today, this week, etc.), use time_summary with user (login, id, or me).
 - If they want general technical advice, Linux/Redmine/Ultron help, or a conceptual question (not tied to a ticket), use ol with text.
 - If they want a list of new/old/unassigned issues, pick the matching list command.
+- If they want to find/search for a ticket by keywords (hint, title fragment, note text) without knowing the id, use find_issue with text.
 - The user message may include a replied-to Discord excerpt above a `---` separator. Treat deictic references (this, esto, all this, the above) as referring to that excerpt. Do not ask for clarification when the excerpt supplies the missing content.
 - If you are unsure, use kind chat with a brief clarification question.
 - NEVER output approve, remove, show_config, or token — those are not available here.
@@ -203,7 +209,13 @@ def _validate_args(command: str, args: Any) -> dict[str, Any]:
         iid = _as_int(args.get("issue_id"), "issue_id")
         h = _as_positive_hours(args.get("hours"), "hours")
         return {"issue_id": iid, "hours": h}
+    if command == "time_summary":
+        user = _as_nonempty_str(args.get("user"), "user")
+        return {"user": user}
     if command == "ol":
+        txt = _as_nonempty_str(args.get("text"), "text")
+        return {"text": txt}
+    if command == "find_issue":
         txt = _as_nonempty_str(args.get("text"), "text")
         return {"text": txt}
     raise ValueError(f"unknown command {command!r}")
@@ -237,6 +249,8 @@ def parse_router_json_text(text: str) -> NLRouterOutcome:
         cmd = "list_new_issues"
     if cmd == "unassigned_issues":
         cmd = "list_unassigned_issues"
+    if cmd in ("search_issue", "search_issues", "find_issues"):
+        cmd = "find_issue"
 
     if cmd in NL_FORBIDDEN_COMMANDS:
         return NLAdminRejected(command=cmd)

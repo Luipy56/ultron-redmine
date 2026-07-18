@@ -73,15 +73,16 @@ Implement the operator's improvement request: new commands, refactors, bug fixes
 1. **Read before edit** — inspect relevant modules; follow conventions.
 2. **Minimal scope** — only files needed for the task.
 3. **No secrets** — do not add tokens to code; use env vars and `.env` (untracked).
-4. **Install editable** after Python/package changes:
+4. **Never delete aggressively** — refuse `rm -rf /` and similar mass/irreversible deletes; see `.cursor/rules/ultron-no-aggressive-delete.mdc` and `ultron/prompts/ca-pi-no-aggressive-delete.md`.
+5. **Install editable** after Python/package changes:
    ```bash
    cd /root/Repos/ultron-redmine && .venv/bin/pip install -q -e .
    ```
-5. **npm install** when touching pi / `package.json`:
+6. **npm install** when touching pi / `package.json`:
    ```bash
    cd /root/Repos/ultron-redmine && npm install --ignore-scripts --silent
    ```
-6. **Verify imports** before finishing:
+7. **Verify imports** before finishing:
    ```bash
    cd /root/Repos/ultron-redmine && .venv/bin/python -c "
    from ultron.settings import load_env
@@ -90,16 +91,16 @@ Implement the operator's improvement request: new commands, refactors, bug fixes
    print('import_ok')
    "
    ```
-7. **Syntax check** changed modules if you touched them:
+8. **Syntax check** changed modules if you touched them:
    ```bash
    .venv/bin/python -m py_compile ultron/bot.py  # etc.
    ```
-8. **Deploy (manual fallback)** after any code change if `/upgrade` does not restart cleanly:
+9. **Deploy (manual fallback)** after any code change if `/upgrade` does not restart cleanly:
    ```bash
    ./scripts/ultron-dump.sh
    ```
-9. **Do not restart Ultron yourself** — `run_self_upgrade` requests `systemctl restart --no-block ultron.service` after you exit. Say clearly in your summary that a restart will follow.
-10. Bump **patch** version in `pyproject.toml` and `ultron/__init__.py` together on every committed change.
+10. **Do not restart Ultron yourself** — `run_self_upgrade` requests `systemctl restart --no-block ultron.service` after you exit. Say clearly in your summary that a restart will follow.
+11. Bump **patch** version in `pyproject.toml` and `ultron/__init__.py` together on every committed change.
 
 ### Output format (Discord)
 

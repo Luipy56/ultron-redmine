@@ -34,7 +34,9 @@ Allowed invoke commands and args:
 - ask_issue — {"issue_id": <int>, "question": "<non-empty string>"}
 - note — {"issue_id": <int>, "text": "<non-empty note body>"}
 - log_time — {"issue_id": <int>, "hours": <positive number>}
+- time_summary — {"user": "<Redmine login, numeric user id, or me>"}
 - ol — {"text": "<non-empty string>"}
+- find_issue — {"text": "<non-empty search hint>"}
 - ping, help, status, list_new_issues, list_unassigned_issues — {}
 - issues_by_status — {"status": "<Redmine status name>"}
 

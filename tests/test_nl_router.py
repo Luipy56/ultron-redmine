@@ -61,6 +61,33 @@ def test_parse_router_log_time_accepts_string_hours() -> None:
     assert out.args == {"issue_id": 3, "hours": 2.25}
 
 
+def test_parse_router_invoke_time_summary() -> None:
+    raw = '{"kind":"invoke","command":"time_summary","args":{"user":"alice"}}'
+    out = parse_router_json_text(raw)
+    assert isinstance(out, NLInvoke)
+    assert out.command == "time_summary"
+    assert out.args == {"user": "alice"}
+
+
+def test_parse_router_time_summary_accepts_me() -> None:
+    raw = '{"kind":"invoke","command":"time_summary","args":{"user":"me"}}'
+    out = parse_router_json_text(raw)
+    assert isinstance(out, NLInvoke)
+    assert out.args == {"user": "me"}
+
+
+def test_parse_router_time_summary_rejects_empty_user() -> None:
+    raw = '{"kind":"invoke","command":"time_summary","args":{"user":"  "}}'
+    out = parse_router_json_text(raw)
+    assert isinstance(out, NLParseError)
+
+
+def test_parse_router_time_summary_rejects_missing_user() -> None:
+    raw = '{"kind":"invoke","command":"time_summary","args":{}}'
+    out = parse_router_json_text(raw)
+    assert isinstance(out, NLParseError)
+
+
 def test_parse_router_invoke_ol() -> None:
     raw = '{"kind":"invoke","command":"ol","args":{"text":"How do I restart Ultron under systemd?"}}'
     out = parse_router_json_text(raw)

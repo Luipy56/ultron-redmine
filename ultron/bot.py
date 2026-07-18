@@ -38,7 +38,11 @@ from ultron.config import (
     llm_chain_resolve_start_index,
     llm_chain_slash_model_override,
 )
-from ultron.redmine_listings import markdown_issues_by_status, markdown_unassigned_open_issues
+from ultron.redmine_listings import (
+    markdown_find_issues,
+    markdown_issues_by_status,
+    markdown_unassigned_open_issues,
+)
 from ultron.report_schedule import build_reports_startup_message, run_report_schedule_entry
 from ultron.llm import (
     ChainSkipNotice,
@@ -323,6 +327,7 @@ _HELP_TEXT = (
 • `/list_new_issues` — Issues in the configured “new” status past the minimum age (see `discord.new_issues`).
 • `/issues_by_status` `status` — Same style of list for a Redmine status name (limits from `discord.new_issues`).
 • `/list_unassigned_issues` — Unassigned open issues past the minimum age (`discord.unassigned_open`).
+• `/find_issue` `text` — Full-text search for issues in the default Redmine project (`redmine.find_issue_project`, default **10_AMVARA**): subject, description, notes. Up to 20 titles (15 chars) + issue links; extras as issue-number links only.
 • `/time_summary` `user` — Redmine **spent hours** for a user: **today**, **this week** (Mon–today), **last 7 days** (by **spent_on**), and **last 24 h** (by **created_on**). `user` = Redmine login, numeric id, or **`me`**. If login lookup fails (permissions), set **redmine.user_id_by_login** in `config.yaml`.
 • `/log_time` `issue_id` `hours` [`comments`] [`spent_on`] — Log spent hours (booked as the **Redmine API key** user). Optional **comments** and **spent_on** (YYYY-MM-DD). See **REDMINE_TIME_ACTIVITY_ID** in `.env` when Redmine has several activities.
 • `/summary` `issue_id` [`llm_provider`] [`llm_model`] — Ticket summary (requires LLM). Optional provider/model: autocomplete when configured; omit for defaults.
@@ -334,7 +339,7 @@ _HELP_TEXT = (
 
 **@mention** or **reply**: whitelisted only. `discord.nl_commands` / `ULTRON_NL_COMMANDS` enables LLM routing into allowed commands (including Amvara audits and compound Redmine tasks).
 
-Without **llm_chain**, `/summary`, `/ask_issue`, `/note`, and `/ol` are unavailable; listings, `/ping`, `/rpsls`, and `/token` still work.
+Without **llm_chain**, `/summary`, `/ask_issue`, `/note`, and `/ol` are unavailable; listings (including `/find_issue`), `/ping`, `/rpsls`, and `/token` still work.
 
 **Bot admins only**
 • `/pi` `text` — Run **pi** with Ollama on the Ultron checkout (file/shell access in workspace). Requires `npm install` + Ollama in **llm_chain**.
@@ -395,6 +400,11 @@ def _nl_dispatch_status_line(command: str, args: dict[str, Any]) -> str:
         return f"Listing issues with status **{escape_markdown(st)}**…"
     if command == "list_unassigned_issues":
         return "Fetching **unassigned** open issues…"
+    if command == "find_issue":
+        preview = str(args.get("text", "")).strip().replace("\n", " ")
+        if len(preview) > 80:
+            preview = preview[:79] + "…"
+        return f"Searching issues for **{escape_markdown(preview) or '…'}**…"
     if command == "summary":
         return f"Summarizing issue **#{int(args['issue_id'])}**…"
     if command == "ask_issue":
@@ -405,6 +415,11 @@ def _nl_dispatch_status_line(command: str, args: dict[str, Any]) -> str:
         return (
             f"Logging **{float(args['hours']):g}** h on issue **#{int(args['issue_id'])}**…"
         )
+    if command == "time_summary":
+        u = str(args.get("user", "")).strip().replace("\n", " ")
+        if len(u) > 80:
+            u = u[:79] + "…"
+        return f"Fetching time summary for **{escape_markdown(u) or '…'}**…"
     if command == "ol":
         preview = str(args.get("text", "")).strip().replace("\n", " ")
         if len(preview) > 80:
@@ -430,6 +445,24 @@ async def _nl_edit_or_reply(
             pass
     try:
         return await message.reply(text, mention_author=mention_author)
+    except discord.HTTPException:
+        return None
+
+
+async def _nl_edit_or_reply_embed(
+    message: discord.Message,
+    status_msg: discord.Message | None,
+    embed: discord.Embed,
+) -> discord.Message | None:
+    """Prefer editing the processing bubble to an embed; otherwise reply with embed."""
+    if status_msg is not None:
+        try:
+            await status_msg.edit(content=None, embed=embed)
+            return status_msg
+        except discord.HTTPException:
+            pass
+    try:
+        return await message.reply(embed=embed, mention_author=False)
     except discord.HTTPException:
         return None
 
@@ -780,6 +813,8 @@ def _format_show_config(app_cfg: AppConfig, env: EnvSettings) -> str:
         f"• **redmine.user_id_by_login:** {len(app_cfg.redmine.user_id_by_login)} alias(es) "
         f"(for **`/time_summary`** when login API lookup is unavailable)",
         f"• **redmine.time_summary_max_entries:** {app_cfg.redmine.time_summary_max_entries}",
+        f"• **redmine.find_issue_project:** {app_cfg.redmine.find_issue_project!r} "
+        f"(default project for **`/find_issue`**)",
         f"• **discord.ephemeral_default:** {app_cfg.discord.ephemeral_default}",
         f"• **discord.issue_metadata_header:** {app_cfg.discord.issue_metadata_header}",
         f"• **discord.new_issues:** status_name={ni.status_name!r} list_limit={ni.list_limit} "
@@ -1107,6 +1142,50 @@ async def _send_unassigned_open_issues_list(
         interaction,
         action="sent unassigned issue list",
         fields=f"total={total} shown={n_show}",
+    )
+
+
+async def _send_find_issue_list(
+    *,
+    interaction: discord.Interaction,
+    redmine: RedmineClient,
+    ephemeral: bool,
+    text: str,
+    project_id: str,
+    log_command: str,
+) -> None:
+    """Full-text issue search; interaction already deferred."""
+    body, err, total = await markdown_find_issues(
+        redmine=redmine,
+        text=text,
+        project_id=project_id,
+    )
+    if err is not None:
+        await interaction.followup.send(err, ephemeral=ephemeral)
+        if "Redmine error:" in err:
+            log_slash_error(log_command, interaction, action="redmine request failed", detail=err)
+        else:
+            log_slash_output(log_command, interaction, action="validation failed")
+        return
+    assert body is not None
+    if total == 0:
+        await interaction.followup.send(body, ephemeral=ephemeral)
+        log_slash_output(log_command, interaction, action="empty result", fields="total=0")
+        return
+    parts = chunk_discord(body, limit=1900)
+    emb = embed_issue_list_intro(
+        title="Find issue",
+        total=min(20, total),
+        first_body=parts[0],
+    )
+    await interaction.followup.send(embed=emb, ephemeral=ephemeral)
+    for part in parts[1:]:
+        await interaction.followup.send(part, ephemeral=ephemeral, suppress_embeds=True)
+    log_slash_output(
+        log_command,
+        interaction,
+        action="sent find_issue results",
+        fields=f"total={total} project={project_id!r}",
     )
 
 
@@ -2062,6 +2141,18 @@ class UltronBot(commands.Bot):
                 assert body is not None
                 await _reply_chunked_to_message(message, body, edit_first=status_message)
                 return
+            if cmd == "find_issue":
+                body, err, _total = await markdown_find_issues(
+                    redmine=self.redmine,
+                    text=str(args["text"]),
+                    project_id=self.app_cfg.redmine.find_issue_project,
+                )
+                if err is not None:
+                    await _err(err)
+                    return
+                assert body is not None
+                await _reply_chunked_to_message(message, body, edit_first=status_message)
+                return
             if cmd == "log_time":
                 issue_id = int(args["issue_id"])
                 hours = float(args["hours"])
@@ -2091,6 +2182,68 @@ class UltronBot(commands.Bot):
                 if tid is not None:
                     reply += f"\n• Time entry **#{tid}**"
                 await _reply_chunked_to_message(message, reply, edit_first=status_message)
+                return
+            if cmd == "time_summary":
+                user = str(args["user"])
+                now_utc = datetime.now(timezone.utc)
+                try:
+                    uid, label = await resolve_redmine_user_for_time_summary(
+                        self.redmine,
+                        user,
+                        self.app_cfg.redmine.user_id_by_login,
+                    )
+                except ValueError as e:
+                    await _err(str(e))
+                    return
+                except RedmineError:
+                    await _err(
+                        "Could not resolve that Redmine user. Try a numeric **user id** or **`me`**."
+                    )
+                    return
+                try:
+                    d_from, d_to = fetch_spent_on_range_strings(
+                        self.app_cfg.timezone, now_utc, lookback_days=14
+                    )
+                    entries = await self.redmine.list_time_entries(
+                        user_id=uid,
+                        spent_on_from=d_from,
+                        spent_on_to=d_to,
+                        max_entries=self.app_cfg.redmine.time_summary_max_entries,
+                    )
+                except RedminePermissionError as e:
+                    await _err(str(e))
+                    return
+                except RedmineError:
+                    await _err("Redmine request failed while loading time entries. Try again later.")
+                    return
+                capped = len(entries) >= self.app_cfg.redmine.time_summary_max_entries
+                buckets = compute_time_summary_buckets(
+                    entries,
+                    timezone_name=self.app_cfg.timezone,
+                    now_utc=now_utc,
+                )
+                tz_disp = (self.app_cfg.timezone or "").strip() or "UTC"
+                emb = embed_time_summary(
+                    user_label=label,
+                    today_h=buckets.today,
+                    week_h=buckets.this_week,
+                    last7_h=buckets.last_7_days,
+                    last24_h=buckets.last_24h,
+                    timezone_name=tz_disp,
+                )
+                foot = (
+                    f"Capped at {len(entries)} entries ({d_from}–{d_to} spent_on); totals may be incomplete."
+                    if capped
+                    else f"From {len(entries)} entries in range {d_from}–{d_to} (spent_on)."
+                )
+                emb.set_footer(text=foot[:2048])
+                out = await _nl_edit_or_reply_embed(message, status_message, emb)
+                if out is None:
+                    log_chat_mention_error(
+                        message,
+                        action="nl time_summary embed reply failed",
+                        feature="nl_router",
+                    )
                 return
             if cmd == "summary":
                 issue_id = int(args["issue_id"])
@@ -3804,6 +3957,36 @@ class UltronBot(commands.Bot):
                 ephemeral=ephemeral,
                 cfg=uo,
                 log_command="list_unassigned_issues",
+            )
+
+        @self.tree.command(
+            name="find_issue",
+            description="Search issues by hint (title/description/notes) in the default Redmine project.",
+        )
+        @app_commands.describe(text="Search hint (matches subject, description, notes via Redmine search)")
+        async def find_issue_cmd(interaction: discord.Interaction, text: str) -> None:
+            ephemeral = self.app_cfg.discord.ephemeral_default
+            q = text.strip()
+            log_slash_input(
+                "find_issue",
+                interaction,
+                fields=f"ephemeral={ephemeral} text={_truncate_for_log(q)!r}",
+            )
+            if not q:
+                await interaction.response.send_message(
+                    "Pass **`text`**: a short hint to search for (title, description, notes, …).",
+                    ephemeral=True,
+                )
+                log_slash_output("find_issue", interaction, action="missing text parameter")
+                return
+            await interaction.response.defer(ephemeral=ephemeral, thinking=True)
+            await _send_find_issue_list(
+                interaction=interaction,
+                redmine=self.redmine,
+                ephemeral=ephemeral,
+                text=q,
+                project_id=self.app_cfg.redmine.find_issue_project,
+                log_command="find_issue",
             )
 
         @self.tree.command(

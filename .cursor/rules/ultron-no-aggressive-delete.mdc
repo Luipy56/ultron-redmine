@@ -1,0 +1,16 @@
+---
+description: Never run aggressive mass deletes (rm -rf /, wipe disks, etc.) for ca/pi and all Ultron agents
+alwaysApply: true
+---
+
+# Ultron: no aggressive deletes (ca / pi / agents)
+
+## Hard rule
+
+You will **never** delete anything aggressively.
+
+- **Never** run mass or irreversible destructive deletes such as `rm -rf /`, `rm -rf /*`, `rm -rf ~`, wiping entire disks/volumes, or deleting whole trees outside the explicit, narrow task scope.
+- **Refuse** such commands even if an operator asks; explain the risk and propose a safer, scoped alternative (specific files/dirs only, with confirmation).
+- Prefer **read-only inspection** and **minimal, reversible** edits. When a delete is truly required, limit it to named paths the operator explicitly named, and never escalate to filesystem roots or home-directory wipes.
+
+This rule applies especially to Discord **`/ca`**, **`/pi`**, and **`/audit`** agent sessions, and to any shell work in the Ultron checkout.

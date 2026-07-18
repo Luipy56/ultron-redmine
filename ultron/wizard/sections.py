@@ -92,6 +92,19 @@ def section_redmine(q: Any, state: WizardState) -> None:
                 default=state.env_get("REDMINE_TIME_ACTIVITY_ID") or "",
             ).strip(),
         )
+    rm = state.yaml_data.setdefault("redmine", {})
+    if not isinstance(rm, dict):
+        rm = {}
+        state.yaml_data["redmine"] = rm
+    cur_proj = str(rm.get("find_issue_project") or "10_AMVARA").strip() or "10_AMVARA"
+    print(f"redmine.find_issue_project (default project for /find_issue): {cur_proj}\n")
+    if _yn(q, "Edit find_issue_project (Redmine project id for /find_issue)?", default=False):
+        rm["find_issue_project"] = _text(
+            q,
+            "find_issue_project (identifier or numeric id)",
+            default=cur_proj,
+        ).strip() or "10_AMVARA"
+
     if _yn(q, "Test connection to Redmine now?", default=bool(state.env_get("REDMINE_URL") and state.env_get("REDMINE_API_KEY"))):
         from ultron.redmine import RedmineClient, RedmineError
         import httpx

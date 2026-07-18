@@ -1,1 +1,3 @@
 # UTC review stamps (one block per run). Managed by agent 008.
+
+2026-07-18T14:03:26Z tasks=3 signals=weekly_due=1 doc_drift=0 task_backlog=0 pytest=skipped(readonly) summary=USER_GUIDE status/commands; NL time_summary parity; README llm + bak hygiene

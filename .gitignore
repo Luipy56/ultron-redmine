@@ -3,6 +3,7 @@
 config.yaml
 config.yaml.bak.*
 config.yaml.backup.*
+*.bak.*
 data/
 .venv/
 ultron.log
