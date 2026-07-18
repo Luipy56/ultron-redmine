@@ -23,6 +23,17 @@ LAST_REVIEW_FILE="${SCRIPTDIR}/001-redmine-reviewer/time-of-last-review.txt"
 ENH_REVIEW_FILE="${SCRIPTDIR}/008-enhancement-reviewer/time-of-last-review.txt"
 INTAKE_PREFLIGHT="${REPO_ROOT}/scripts/redmine-reviewer-preflight.sh"
 ENH_PREFLIGHT="${REPO_ROOT}/scripts/enhancement-reviewer-preflight.sh"
+# Local stamp (gitignored): last HEAD applied via scripts/ultron-dump.sh from this loop.
+LAST_DUMP_SHA_FILE="${SCRIPTDIR}/.last-ultron-dump-sha"
+ULTRON_DUMP_SCRIPT="${REPO_ROOT}/scripts/ultron-dump.sh"
+# Paths that require pip/npm install + systemd restart when they change on main.
+ULTRON_RUNTIME_PATHS=(
+  ultron/
+  pyproject.toml
+  package.json
+  package-lock.json
+  scripts/ultron-dump.sh
+)
 
 cd "$SCRIPTDIR" || exit 1
 
@@ -324,7 +335,65 @@ step_committer() {
     return 0
   fi
   run_agent "committer" "has_uncommitted_changes" "040-committer.md" \
-    "Run 040-committer on main. Commit when ready; bump pyproject + __init__ version; push origin main." "committer"
+    "Run 040-committer on main. Commit when ready; bump pyproject + __init__ version; push origin main. Do not run ultron-dump.sh — the orchestrator does that after committer." "committer"
+}
+
+ultron_runtime_diff_quiet() {
+  # Exit 0 if no runtime-path diff between the two commits (or vs working tree).
+  local from="$1"
+  local to="${2:-}"
+  (
+    cd "$REPO_ROOT" || exit 0
+    if [[ -n "$to" ]]; then
+      git diff --quiet "$from" "$to" -- "${ULTRON_RUNTIME_PATHS[@]}"
+    else
+      git diff --quiet "$from" -- "${ULTRON_RUNTIME_PATHS[@]}"
+    fi
+  )
+}
+
+ultron_needs_dump() {
+  local head
+  head=$(cd "$REPO_ROOT" && git rev-parse HEAD 2>/dev/null) || return 1
+  if [[ ! -f "$LAST_DUMP_SHA_FILE" ]]; then
+    # No stamp yet: dump if HEAD itself has Ultron runtime files (always true) —
+    # first loop after deploy catch-up when code may already be ahead of systemd.
+    return 0
+  fi
+  local prev
+  prev=$(tr -d '[:space:]' <"$LAST_DUMP_SHA_FILE")
+  [[ -z "$prev" ]] && return 0
+  if ! (cd "$REPO_ROOT" && git cat-file -e "${prev}^{commit}" 2>/dev/null); then
+    return 0
+  fi
+  [[ "$prev" == "$head" ]] && return 1
+  if ultron_runtime_diff_quiet "$prev" "$head"; then
+    return 1
+  fi
+  return 0
+}
+
+step_ultron_dump() {
+  if [[ "${AGENT_ULTRON_DUMP:-1}" == "0" ]]; then
+    echo "----- ultron dump (skip: AGENT_ULTRON_DUMP=0)"
+    return 0
+  fi
+  if [[ ! -x "$ULTRON_DUMP_SCRIPT" ]] && [[ ! -f "$ULTRON_DUMP_SCRIPT" ]]; then
+    echo "----- ultron dump (skip: missing $ULTRON_DUMP_SCRIPT)" >&2
+    return 0
+  fi
+  if ! ultron_needs_dump; then
+    echo "----- ultron dump (skip: no runtime changes since last dump)"
+    return 0
+  fi
+  echo "-----> ultron dump $(date "+%Y-%m-%d %H:%M:%S") <----"
+  if bash "$ULTRON_DUMP_SCRIPT"; then
+    (cd "$REPO_ROOT" && git rev-parse HEAD) >"$LAST_DUMP_SHA_FILE"
+    echo "----- ultron dump: stamped $(tr -d '[:space:]' <"$LAST_DUMP_SHA_FILE")"
+  else
+    echo "ERROR: ultron-dump.sh failed — systemd may still be on an old revision." >&2
+    return 1
+  fi
 }
 
 run_full_cycle() {
@@ -342,6 +411,8 @@ run_full_cycle() {
   step_tester
   step_closing_review
   step_committer
+  # After commits (or a pull that brought runtime changes), reinstall + restart.
+  step_ultron_dump || true
 }
 
 # One-shot for /upgrade: implement FEAT → handoff → test → close (no intake/enhancement/committer).
@@ -389,10 +460,12 @@ Usage: $(basename "$0") [COMMAND]
     tester            Tester
     closing-review    Closing reviewer
     committer         Commit when tree dirty
+    dump, ultron-dump Reinstall + systemctl restart when Ultron runtime paths changed
     shot, upgrade-shot  FEAT→handoff→tester→closing (used by Discord /upgrade)
 
 Environment: AGENT_LOOP_SLEEP_MINUTES, AGENT_GIT_SYNC, AGENT_GH_REPO (default Luipy56/ultron-redmine),
-  AGENT_INTAKE_REVIEWER_ALWAYS, AGENT_ENHANCEMENT_REVIEWER_ALWAYS, AGENT_CURSOR_TIMEOUT_MINUTES, …
+  AGENT_ULTRON_DUMP (default 1; set 0 to skip dump/restart), AGENT_INTAKE_REVIEWER_ALWAYS,
+  AGENT_ENHANCEMENT_REVIEWER_ALWAYS, AGENT_CURSOR_TIMEOUT_MINUTES, …
 
 See docs/agent-loop.md and autoagents/TASKS-README.md.
 EOF
@@ -409,6 +482,7 @@ if [[ -n "${1:-}" ]]; then
     tester) step_tester ;;
     closing-review|closing) step_closing_review ;;
     committer) step_committer ;;
+    dump|ultron-dump) step_ultron_dump ;;
     shot|upgrade-shot) run_upgrade_shot ;;
     *) usage; exit 1 ;;
   esac

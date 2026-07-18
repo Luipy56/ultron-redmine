@@ -27,14 +27,28 @@ Supporting scripts live under **`scripts/`**:
 - `redmine-reviewer-preflight.sh` — digest for agent 001
 - `enhancement-reviewer-preflight.sh` — digest for agent 008
 - `move-agent-task-to-done.sh` — archive **CLOSED-** tasks
+- `ultron-dump.sh` — editable reinstall + **`systemctl restart`** (loop runs this after committer when runtime paths change)
 
 ## Pipeline (one cycle)
 
 ```text
-001 intake → 008 enhancement → FEAT coder (×5 max) → NEW/WIP coder → 012 handoff → 020 tester → 030 closing → 040 committer
+001 intake → 008 enhancement → FEAT coder (×5 max) → NEW/WIP coder → 012 handoff → 020 tester → 030 closing → 040 committer → ultron-dump
 ```
 
 Task statuses: **new/feat → wip → untested → testing → closed → done/YYYY/MM/DD/** — see **`autoagents/TASKS-README.md`**.
+
+### Deploy after code updates (`ultron-dump`)
+
+When **`ultron/`**, **`pyproject.toml`**, or related runtime paths change on **`main`** (via committer or a pull), a version bump alone is not enough: the systemd process must be reinstalled and restarted.
+
+Each full cycle ends with **`step_ultron_dump`**, which runs **`scripts/ultron-dump.sh`** (`pip install -e .`, optional `npm install`, `systemctl restart`) when those paths differ from the last successful dump stamp (`autoagents/.last-ultron-dump-sha`, gitignored).
+
+| Command / flag | Purpose |
+|----------------|---------|
+| `./autoagents/ultron-agent-loop.sh dump` | Run the dump step alone |
+| `AGENT_ULTRON_DUMP=0` | Skip dump/restart (e.g. read-only hosts) |
+
+Discord **`/upgrade`** still runs dump + restart itself after the **shot** (the shot path does **not** call `step_ultron_dump`, to avoid a double restart).
 
 ## Discord `/upgrade` (one shot)
 
@@ -66,6 +80,7 @@ Environment highlights:
 | `AGENT_GH_REPO` | `Luipy56/ultron-redmine` | GitHub repo for optional GH intake |
 | `ULTRON_LOG_FILE` | `./ultron.log` | Log path for 001 heuristics |
 | `AGENT_INTAKE_REVIEWER_ALWAYS` | 0 | Force 001 cursor-agent every cycle |
+| `AGENT_ULTRON_DUMP` | 1 | After committer, run `ultron-dump.sh` when runtime paths changed |
 
 ## Tracker updates
 

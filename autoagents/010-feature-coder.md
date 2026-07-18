@@ -31,6 +31,7 @@ Adhere to **`autoagents/TASKS-README.md`**.
 - **No secrets** in code or task files — use `.env` / `config.yaml` patterns.
 - After Python changes: `.venv/bin/pip install -q -e .` and `.venv/bin/pytest -q` for affected areas.
 - Bump **patch** version in **`pyproject.toml`** and **`ultron/__init__.py`** together when you change shipped code.
+- Do **not** run **`./scripts/ultron-dump.sh`** or restart systemd yourself — the agent loop dump step (after committer) or Discord **`/upgrade`** applies the running service.
 
 ### Testing instructions
 
