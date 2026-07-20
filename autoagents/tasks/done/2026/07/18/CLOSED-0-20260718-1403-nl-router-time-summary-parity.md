@@ -1,3 +1,12 @@
+---
+## Closing summary (TOP)
+
+- **What happened:** NL routing lacked `time_summary` parity with slash `/time_summary`, so @mentions about spent hours fell through to chat.
+- **What was done:** Added `time_summary` to NL allowlist, validation, Amvara planner/prefilter, and `_run_nl_invoke` (mirroring slash); patch 2.0.17 → 2.0.18.
+- **What was tested:** Pytest (nl_router + amvara prefilter + time_reporting: 22 passed), import/allowlist checks, admin/`rpsls` rejection — all PASS; optional Discord smoke skipped.
+- **Why closed:** All required acceptance criteria passed.
+- **Closed at (UTC):** 2026-07-20 11:26
+---
 # NL router: add time_summary parity
 
 ## Tracker
@@ -40,3 +49,28 @@ Slash **`/time_summary`** works for allowlisted users, and NL already routes **`
 - [ ] Optional smoke (needs running bot + Redmine): @mention allowlisted Ultron with “how much time did me log today?” / “time summary for alice” and confirm the time-summary embed (today / week / 7d / 24h), same as `/time_summary`
 - [ ] Confirm admin commands (`approve`, `token`, …) still rejected on NL path; `rpsls` not routed
 - [ ] No secrets in the diff
+
+## Test report
+
+- **Date/time (UTC):** 2026-07-20 11:25:25 UTC (start) → 2026-07-20 11:27 UTC (finish)
+- **Environment:** branch `main`, `.venv` (editable install via `.venv/bin/pip install -q -e .`)
+
+### What was tested
+
+NL `time_summary` parity: allowlist / parse / validate args, Amvara prefilter + time reporting unit tests, import of `UltronBot`, rejection of admin/`rpsls` on NL path. Optional live Discord @mention smoke not run.
+
+### Results
+
+| Criterion | Result | Evidence |
+|-----------|--------|----------|
+| Editable install | PASS | `.venv/bin/pip install -q -e .` succeeded |
+| `pytest` nl_router + amvara prefilter + time_reporting | PASS | 22 passed in 1.04s |
+| Import + `'time_summary' in NL_ALLOWED_COMMANDS` | PASS | `import_ok True`; allowlist includes `time_summary` |
+| Valid `user` / `me`; empty/missing rejected | PASS | `parse_router_json_text` → `NLInvoke` / `NLParseError` as expected |
+| Admin (`approve`, `token`) rejected; `rpsls` not routed | PASS | `NLAdminRejected` / `NLParseError`; `rpsls` absent from `NL_ALLOWED_COMMANDS` |
+| Optional Discord @mention smoke | SKIP | Optional; no live Discord exercise in this run |
+| No secrets in related sources | PASS | No hardcoded API key / Discord token literals in touched modules |
+
+### Overall: **PASS**
+
+Operator feedback: NL routing for spent-hours summaries matches the slash command surface in code and unit tests. Live Discord confirmation of the embed was left optional and skipped; worth a quick @mention check after the next dump/restart if operators want end-to-end confidence.

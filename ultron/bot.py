@@ -41,6 +41,7 @@ from ultron.config import (
 from ultron.redmine_listings import (
     markdown_find_issues,
     markdown_issues_by_status,
+    markdown_top_tickets,
     markdown_unassigned_open_issues,
 )
 from ultron.report_schedule import build_reports_startup_message, run_report_schedule_entry
@@ -328,6 +329,7 @@ _HELP_TEXT = (
 • `/issues_by_status` `status` — Same style of list for a Redmine status name (limits from `discord.new_issues`).
 • `/list_unassigned_issues` — Unassigned open issues past the minimum age (`discord.unassigned_open`).
 • `/find_issue` `text` — Full-text search for issues in the default Redmine project (`redmine.find_issue_project`, default **10_AMVARA**): subject, description, notes. Up to 20 titles (15 chars) + issue links; extras as issue-number links only.
+• `/top_tickets` `project` [`kind_filter`] [`limit`] — Top **open** issues in a project (fuzzy match on identifier or name). `kind_filter`: **priority** (default), **newests**, or **oldests**. `limit` default **10** (max 50).
 • `/time_summary` `user` — Redmine **spent hours** for a user: **today**, **this week** (Mon–today), **last 7 days** (by **spent_on**), and **last 24 h** (by **created_on**). `user` = Redmine login, numeric id, or **`me`**. If login lookup fails (permissions), set **redmine.user_id_by_login** in `config.yaml`.
 • `/log_time` `issue_id` `hours` [`comments`] [`spent_on`] — Log spent hours (booked as the **Redmine API key** user). Optional **comments** and **spent_on** (YYYY-MM-DD). See **REDMINE_TIME_ACTIVITY_ID** in `.env` when Redmine has several activities.
 • `/summary` `issue_id` [`llm_provider`] [`llm_model`] — Ticket summary (requires LLM). Optional provider/model: autocomplete when configured; omit for defaults.
@@ -339,7 +341,7 @@ _HELP_TEXT = (
 
 **@mention** or **reply**: whitelisted only. `discord.nl_commands` / `ULTRON_NL_COMMANDS` enables LLM routing into allowed commands (including Amvara audits and compound Redmine tasks).
 
-Without **llm_chain**, `/summary`, `/ask_issue`, `/note`, and `/ol` are unavailable; listings (including `/find_issue`), `/ping`, `/rpsls`, and `/token` still work.
+Without **llm_chain**, `/summary`, `/ask_issue`, `/note`, and `/ol` are unavailable; listings (including `/find_issue`, `/top_tickets`), `/ping`, `/rpsls`, and `/token` still work.
 
 **Bot admins only**
 • `/pi` `text` — Run **pi** with Ollama on the Ultron checkout (file/shell access in workspace). Requires `npm install` + Ollama in **llm_chain**.
@@ -405,6 +407,16 @@ def _nl_dispatch_status_line(command: str, args: dict[str, Any]) -> str:
         if len(preview) > 80:
             preview = preview[:79] + "…"
         return f"Searching issues for **{escape_markdown(preview) or '…'}**…"
+    if command == "top_tickets":
+        proj = str(args.get("project", "")).strip().replace("\n", " ")
+        if len(proj) > 80:
+            proj = proj[:79] + "…"
+        kind = str(args.get("kind_filter", "priority")).strip() or "priority"
+        lim = args.get("limit", 10)
+        return (
+            f"Listing top tickets in **{escape_markdown(proj) or '…'}** "
+            f"({escape_markdown(kind)}, limit {lim})…"
+        )
     if command == "summary":
         return f"Summarizing issue **#{int(args['issue_id'])}**…"
     if command == "ask_issue":
@@ -1186,6 +1198,52 @@ async def _send_find_issue_list(
         interaction,
         action="sent find_issue results",
         fields=f"total={total} project={project_id!r}",
+    )
+
+
+async def _send_top_tickets_list(
+    *,
+    interaction: discord.Interaction,
+    redmine: RedmineClient,
+    ephemeral: bool,
+    project: str,
+    kind_filter: str,
+    limit: int,
+    log_command: str,
+) -> None:
+    """Top open issues in a project; interaction already deferred."""
+    body, err, shown = await markdown_top_tickets(
+        redmine=redmine,
+        project_query=project,
+        kind_filter=kind_filter,
+        limit=limit,
+    )
+    if err is not None:
+        await interaction.followup.send(err, ephemeral=ephemeral)
+        if "Redmine error:" in err:
+            log_slash_error(log_command, interaction, action="redmine request failed", detail=err)
+        else:
+            log_slash_output(log_command, interaction, action="validation failed")
+        return
+    assert body is not None
+    if shown == 0:
+        await interaction.followup.send(body, ephemeral=ephemeral)
+        log_slash_output(log_command, interaction, action="empty result", fields="shown=0")
+        return
+    parts = chunk_discord(body, limit=1900)
+    emb = embed_issue_list_intro(
+        title="Top tickets",
+        total=shown,
+        first_body=parts[0],
+    )
+    await interaction.followup.send(embed=emb, ephemeral=ephemeral)
+    for part in parts[1:]:
+        await interaction.followup.send(part, ephemeral=ephemeral, suppress_embeds=True)
+    log_slash_output(
+        log_command,
+        interaction,
+        action="sent top_tickets results",
+        fields=f"shown={shown} project={project!r} kind={kind_filter!r}",
     )
 
 
@@ -2146,6 +2204,19 @@ class UltronBot(commands.Bot):
                     redmine=self.redmine,
                     text=str(args["text"]),
                     project_id=self.app_cfg.redmine.find_issue_project,
+                )
+                if err is not None:
+                    await _err(err)
+                    return
+                assert body is not None
+                await _reply_chunked_to_message(message, body, edit_first=status_message)
+                return
+            if cmd == "top_tickets":
+                body, err, _shown = await markdown_top_tickets(
+                    redmine=self.redmine,
+                    project_query=str(args["project"]),
+                    kind_filter=str(args.get("kind_filter", "priority")),
+                    limit=int(args.get("limit", 10)),
                 )
                 if err is not None:
                     await _err(err)
@@ -3987,6 +4058,57 @@ class UltronBot(commands.Bot):
                 text=q,
                 project_id=self.app_cfg.redmine.find_issue_project,
                 log_command="find_issue",
+            )
+
+        @self.tree.command(
+            name="top_tickets",
+            description="Top open issues in a project by priority, newest, or oldest.",
+        )
+        @app_commands.describe(
+            project="Redmine project identifier or name (fuzzy match if misspelled)",
+            kind_filter="Sort: priority (default), newests, or oldests",
+            limit="How many issues to list (default 10, max 50)",
+        )
+        @app_commands.choices(
+            kind_filter=[
+                app_commands.Choice(name="Highest priority", value="priority"),
+                app_commands.Choice(name="Newest", value="newests"),
+                app_commands.Choice(name="Oldest", value="oldests"),
+            ]
+        )
+        async def top_tickets_cmd(
+            interaction: discord.Interaction,
+            project: str,
+            kind_filter: str = "priority",
+            limit: app_commands.Range[int, 1, 50] = 10,
+        ) -> None:
+            ephemeral = self.app_cfg.discord.ephemeral_default
+            proj = project.strip()
+            kind = (kind_filter or "priority").strip() or "priority"
+            log_slash_input(
+                "top_tickets",
+                interaction,
+                fields=(
+                    f"ephemeral={ephemeral} project={_truncate_for_log(proj)!r} "
+                    f"kind_filter={kind!r} limit={int(limit)}"
+                ),
+            )
+            if not proj:
+                await interaction.response.send_message(
+                    "Pass **`project`**: a Redmine project identifier or name.",
+                    ephemeral=True,
+                )
+                log_slash_output("top_tickets", interaction, action="missing project parameter")
+                return
+            await interaction.response.defer(ephemeral=ephemeral, thinking=True)
+            await _send_top_tickets_list(
+                interaction=interaction,
+                redmine=self.redmine,
+                ephemeral=ephemeral,
+                project=proj,
+                kind_filter=kind,
+                limit=int(limit),
+                log_command="top_tickets",
             )
 
         @self.tree.command(

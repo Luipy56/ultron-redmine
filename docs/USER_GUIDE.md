@@ -23,7 +23,14 @@ This document is for **people who use the bot in Discord**, not for server opera
 |--------|----------------|
 | **`/help`** | Lists commands and who may use them (everyone). |
 | **`/ping`** | Quick connectivity check (allowlisted users). |
-| **`/status`** | Placeholder status (allowlisted). |
+| **`/status`** | Bot summary: version, uptime, latency, Redmine host, LLM, NL routing, reports (allowlisted). |
+| **`/find_issue`** | Full-text search for issues in the default Redmine project (allowlisted). |
+| **`/issues_by_status`** | List issues in a Redmine status you name (allowlisted; same age/limit rules as new-issue listings). |
+| **`/time_summary`** | Spent-hours totals for a Redmine user (`me`, login, or id) (allowlisted). |
+| **`/log_time`** | Log spent hours on an issue (booked as the Redmine API key user) (allowlisted). |
+| **`/rpsls`** | Rock–paper–scissors–lizard–Spock vs the bot (allowlisted). |
+
+Full options and operator notes: [README.md — Command overview](../README.md#command-overview).
 
 Use **`/summary`**, **`/ask_issue`**, **`/note`**, and **`/ol`** only when you are allowlisted **and** the bot has an LLM configured; otherwise the bot replies with setup instructions for operators. **`/ol`** is for general or technical questions (Redmine, Ultron, Linux) — advisory only, not ticket-specific like **`/ask_issue`**.
 

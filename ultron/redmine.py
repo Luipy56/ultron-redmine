@@ -128,6 +128,35 @@ class RedmineClient:
                     return int(sid)
         return None
 
+    async def list_projects(self, *, max_projects: int = 500) -> list[dict[str, Any]]:
+        """Paginate ``GET /projects.json`` up to ``max_projects`` entries."""
+        cap = max(1, min(max_projects, 2000))
+        out: list[dict[str, Any]] = []
+        offset = 0
+        while len(out) < cap:
+            lim = min(100, cap - len(out))
+            async with self._client() as c:
+                r = await c.get(
+                    "/projects.json",
+                    params={"limit": lim, "offset": offset},
+                )
+            if r.is_error:
+                raise RedmineError(f"Redmine list projects failed: {r.status_code} {r.text[:500]}")
+            data = r.json()
+            page = list(data.get("projects") or [])
+            if not page:
+                break
+            out.extend(page)
+            total_raw = data.get("total_count")
+            try:
+                total = int(total_raw) if total_raw is not None else len(out)
+            except (TypeError, ValueError):
+                total = len(out)
+            offset += len(page)
+            if len(page) < lim or offset >= total:
+                break
+        return out
+
     async def list_issues(
         self,
         *,
@@ -135,20 +164,25 @@ class RedmineClient:
         limit: int,
         status_id: str | int,
         offset: int = 0,
+        project_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """List issues filtered by ``status_id`` (``\"open\"``, ``\"closed\"``, or a numeric status id)."""
+        """List issues filtered by ``status_id`` (``\"open\"``, ``\"closed\"``, or a numeric status id).
+
+        Optional ``project_id`` is a Redmine project **identifier** (or numeric id as string).
+        """
         lim = min(max(1, limit), 100)
         off = max(0, offset)
+        params: dict[str, Any] = {
+            "status_id": status_id,
+            "sort": sort,
+            "limit": lim,
+            "offset": off,
+        }
+        proj = (project_id or "").strip()
+        if proj:
+            params["project_id"] = proj
         async with self._client() as c:
-            r = await c.get(
-                "/issues.json",
-                params={
-                    "status_id": status_id,
-                    "sort": sort,
-                    "limit": lim,
-                    "offset": off,
-                },
-            )
+            r = await c.get("/issues.json", params=params)
         if r.is_error:
             raise RedmineError(f"Redmine list issues failed: {r.status_code} {r.text[:500]}")
         data = r.json()

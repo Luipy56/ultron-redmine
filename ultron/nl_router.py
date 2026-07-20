@@ -21,6 +21,7 @@ NL_ALLOWED_COMMANDS: frozenset[str] = frozenset(
         "issues_by_status",
         "list_unassigned_issues",
         "find_issue",
+        "top_tickets",
         "summary",
         "ask_issue",
         "note",
@@ -73,6 +74,7 @@ Allowed command names and args (only these):
 - issues_by_status — args {"status":"<exact Redmine status name string>"}
 - list_unassigned_issues — args {}
 - find_issue — args {"text":"<non-empty search hint>"} (Redmine full-text search in the default project)
+- top_tickets — args {"project":"<project identifier or name>", "kind_filter":"<priority|newests|oldests, optional default priority>", "limit":<positive int, optional default 10>}
 - summary — args {"issue_id": <positive integer>}
 - ask_issue — args {"issue_id": <int>, "question": "<non-empty string>"}
 - note — args {"issue_id": <int>, "text": "<non-empty note body>"}
@@ -89,6 +91,7 @@ Rules:
 - If they want general technical advice, Linux/Redmine/Ultron help, or a conceptual question (not tied to a ticket), use ol with text.
 - If they want a list of new/old/unassigned issues, pick the matching list command.
 - If they want to find/search for a ticket by keywords (hint, title fragment, note text) without knowing the id, use find_issue with text.
+- If they want the top N tickets in a specific project (by priority, newest, or oldest), use top_tickets with project (and optional kind_filter / limit).
 - The user message may include a replied-to Discord excerpt above a `---` separator. Treat deictic references (this, esto, all this, the above) as referring to that excerpt. Do not ask for clarification when the excerpt supplies the missing content.
 - If you are unsure, use kind chat with a brief clarification question.
 - NEVER output approve, remove, show_config, or token — those are not available here.
@@ -218,6 +221,21 @@ def _validate_args(command: str, args: Any) -> dict[str, Any]:
     if command == "find_issue":
         txt = _as_nonempty_str(args.get("text"), "text")
         return {"text": txt}
+    if command == "top_tickets":
+        from ultron.redmine_listings import clamp_top_tickets_limit, normalize_top_tickets_kind
+
+        project = _as_nonempty_str(args.get("project"), "project")
+        kind_raw = args.get("kind_filter", args.get("kind"))
+        if kind_raw is None or (isinstance(kind_raw, str) and not kind_raw.strip()):
+            kind = normalize_top_tickets_kind(None)
+        else:
+            kind = normalize_top_tickets_kind(str(kind_raw))
+        limit_raw = args.get("limit", args.get("count"))
+        if limit_raw is None or limit_raw == "":
+            limit = clamp_top_tickets_limit(None)
+        else:
+            limit = clamp_top_tickets_limit(_as_int(limit_raw, "limit"))
+        return {"project": project, "kind_filter": kind, "limit": limit}
     raise ValueError(f"unknown command {command!r}")
 
 
@@ -251,6 +269,8 @@ def parse_router_json_text(text: str) -> NLRouterOutcome:
         cmd = "list_unassigned_issues"
     if cmd in ("search_issue", "search_issues", "find_issues"):
         cmd = "find_issue"
+    if cmd in ("top_ticket", "top_issues", "list_top_tickets"):
+        cmd = "top_tickets"
 
     if cmd in NL_FORBIDDEN_COMMANDS:
         return NLAdminRejected(command=cmd)

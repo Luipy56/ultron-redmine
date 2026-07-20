@@ -20,6 +20,7 @@ _REDMINE_VERB_RE = re.compile(
     r"time_summary|time summary|"
     r"list_new_issues|new issues|issues_by_status|unassigned|"
     r"find_issue|find issue|search issue|buscar|busca|"
+    r"top_tickets|top tickets|top issues|"
     r"redmine|ticket|issue"
     r")\b",
     re.IGNORECASE,

@@ -37,6 +37,7 @@ Allowed invoke commands and args:
 - time_summary — {"user": "<Redmine login, numeric user id, or me>"}
 - ol — {"text": "<non-empty string>"}
 - find_issue — {"text": "<non-empty search hint>"}
+- top_tickets — {"project": "<identifier or name>", "kind_filter": "<priority|newests|oldests optional>", "limit": <optional int>}
 - ping, help, status, list_new_issues, list_unassigned_issues — {}
 - issues_by_status — {"status": "<Redmine status name>"}
 
