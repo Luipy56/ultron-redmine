@@ -1,3 +1,12 @@
+---
+## Closing summary (TOP)
+
+- **What happened:** `docs/USER_GUIDE.md` still called `/status` a placeholder and omitted several allowlisted Discord commands from First commands.
+- **What was done:** Updated USER_GUIDE so `/status` matches `/help`, added one-liners for `/find_issue`, `/issues_by_status`, `/time_summary`, `/log_time`, `/rpsls`, plus README pointer.
+- **What was tested:** Doc spot-check vs help/README, version 2.0.23 pins, pytest 190 passed, bot import — all PASS.
+- **Why closed:** All required acceptance criteria passed.
+- **Closed at (UTC):** 2026-07-20 11:36
+---
 # Refresh USER_GUIDE: /status and allowlisted commands
 
 ## Tracker
@@ -35,3 +44,25 @@
    .venv/bin/python -c "from ultron.settings import load_env; from ultron.bot import UltronBot; load_env(); print('import_ok')"
    ```
 
+
+## Test report
+
+- **Date/time (UTC):** 2026-07-20 11:34–11:35 UTC
+- **Environment:** branch `main` (up to date with origin), `.venv` Python 3.13, version `2.0.23`
+
+### What was tested
+
+`docs/USER_GUIDE.md` First commands table vs `/help`/README allowlist framing, version pins, pytest, and bot import.
+
+### Results
+
+1. **PASS** — `/status` described as real bot summary (version, uptime, latency, Redmine, LLM, NL, reports); no “placeholder” in USER_GUIDE.
+2. **PASS** — Table includes allowlisted one-liners for `/find_issue`, `/issues_by_status`, `/time_summary`, `/log_time`, `/rpsls`.
+3. **PASS** — Pointer to README.md — Command overview present after the table.
+4. **PASS** — Spot-check vs `_HELP_TEXT` / README: all six commands allowlisted (not admin-only).
+5. **PASS** — `pyproject.toml` and `ultron/__init__.py` both `2.0.23`.
+6. **PASS** — `.venv/bin/pytest -q`: 190 passed; import check printed `import_ok`.
+
+### Overall: **PASS**
+
+Operator feedback: USER_GUIDE matches product help text. Safe to close. One UNTESTED item remains: Redmine #7406 `/top_tickets`.
