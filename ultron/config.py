@@ -233,6 +233,12 @@ class PiConfig:
     ollama_connect_timeout_seconds: float = 5.0
     ollama_connect_retries: int = 5
     ollama_connect_retry_delay_seconds: float = 2.0
+    #: When true, run busy/inference readiness checks before long pi / Amvara-pi work.
+    ollama_busy_check: bool = True
+    #: When true with busy_check, treat any model listed by ``/api/ps`` as busy (aggressive).
+    ollama_busy_if_models_loaded: bool = False
+    #: Short ``/api/generate`` probe timeout; 0 disables the probe. Timeout/5xx ⇒ busy.
+    ollama_inference_probe_seconds: float = 12.0
 
 
 @dataclass(frozen=True)
@@ -266,6 +272,10 @@ class CursorAgentConfig:
     bin_path: str = ""
     timeout_seconds: float = 900.0
     workspace: str = ""
+    #: When true, cursor-agent substitutes for ``llm_chain`` chat completions after provider failure.
+    llm_fallback_enabled: bool = True
+    #: Timeout for LLM-fallback sessions (Discord-friendly; default 240s).
+    llm_fallback_timeout_seconds: float = 240.0
 
 
 @dataclass
@@ -581,11 +591,16 @@ def _parse_cursor_agent_config(raw: Any) -> CursorAgentConfig:
     timeout = _float(raw.get("timeout_seconds"), 900.0)
     if timeout <= 0:
         raise ValueError("cursor_agent.timeout_seconds must be positive")
+    llm_fb_timeout = _float(raw.get("llm_fallback_timeout_seconds"), 240.0)
+    if llm_fb_timeout <= 0:
+        raise ValueError("cursor_agent.llm_fallback_timeout_seconds must be positive")
     return CursorAgentConfig(
         enabled=_bool(raw.get("enabled"), True),
         bin_path=_str(raw.get("bin_path"), ""),
         timeout_seconds=timeout,
         workspace=_str(raw.get("workspace"), ""),
+        llm_fallback_enabled=_bool(raw.get("llm_fallback_enabled"), True),
+        llm_fallback_timeout_seconds=llm_fb_timeout,
     )
 
 
@@ -722,9 +737,23 @@ def load_config(path: Path) -> AppConfig:
             pi_raw.get("ollama_connect_retry_delay_seconds") if isinstance(pi_raw, dict) else None,
             2.0,
         ),
+        ollama_busy_check=_bool(
+            pi_raw.get("ollama_busy_check") if isinstance(pi_raw, dict) else None,
+            True,
+        ),
+        ollama_busy_if_models_loaded=_bool(
+            pi_raw.get("ollama_busy_if_models_loaded") if isinstance(pi_raw, dict) else None,
+            False,
+        ),
+        ollama_inference_probe_seconds=_float(
+            pi_raw.get("ollama_inference_probe_seconds") if isinstance(pi_raw, dict) else None,
+            12.0,
+        ),
     )
     if pi_cfg.timeout_seconds <= 0:
         raise ValueError("pi.timeout_seconds must be positive")
+    if pi_cfg.ollama_inference_probe_seconds < 0:
+        raise ValueError("pi.ollama_inference_probe_seconds must be >= 0")
 
     amvara_cfg = _parse_amvara_config(raw.get("amvara"))
     cursor_agent_cfg = _parse_cursor_agent_config(raw.get("cursor_agent"))

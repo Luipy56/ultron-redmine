@@ -114,9 +114,9 @@ Ultron runs on one host (typically **amvara4**) and performs **read-only diagnos
 
 | Entry point | Access | Behavior |
 |-------------|--------|----------|
-| **`/audit host text`** | Whitelist | pi first, cursor-agent fallback |
+| **`/audit host text`** | Whitelist | pi first; **cursor-agent** if pi fails **or Ollama is busy/unreachable** (when fallback enabled) |
 | **`/ca host text`** | Whitelist | cursor-agent only |
-| **`/pi text`** (no host) | Admin | pi on the Ultron checkout only |
+| **`/pi text`** (no host) | Admin | pi on the Ultron checkout only (fail-fast if Ollama busy; no CA fallback) |
 | **@mention** with `amvaraN` | Whitelist | Prefilter → audit or compound planner |
 
 Configure under **`amvara:`** in `config.yaml` (see **`config.example.yaml`**):
@@ -126,9 +126,13 @@ Configure under **`amvara:`** in `config.yaml` (see **`config.example.yaml`**):
 - **`merge_ssh_config`** — Merge `Host amvara\d+` entries from `~/.ssh/config` at startup (logged).
 - **`audit.prefer_agent`**, **`audit.fallback_enabled`**, **`audit.timeout_seconds`**.
 
-**cursor-agent** fallback: enable **`cursor_agent.enabled`**, install the CLI on PATH (`~/.local/bin/cursor-agent`), or set **`ULTRON_CURSOR_AGENT_BIN`**.
+**Ollama busy / slow inference:** under **`pi:`**, **`ollama_busy_check`** (default true) and **`ollama_inference_probe_seconds`** (default 12) probe Ollama before long pi work. When the probe times out or Ollama is down, **`/audit`** and Amvara @mentions skip straight to **cursor-agent** (if **`amvara.audit.fallback_enabled`** and **`cursor_agent.enabled`**).
 
-**Compound @mentions** (audit + Redmine note): e.g. “connect to amvara3, check journal, add summary to issue 7001” — prefilter detects both signals, **`nl_planner`** returns a validated multi-step plan, steps run sequentially.
+**LLM chat fallback:** when **`cursor_agent.llm_fallback_enabled`** is true (default), any chat completion that uses **`llm_chain`** — NL @mention routing, **`/summary`**, **`/ask_issue`**, **`/note`**, **`/ol`** — falls back to **cursor-agent** if every chain provider fails (timeout, connection error, HTTP error). Set **`cursor_agent.llm_fallback_timeout_seconds`** (default 240).
+
+**cursor-agent** install: enable **`cursor_agent.enabled`**, put the CLI on PATH (`~/.local/bin/cursor-agent`), or set **`ULTRON_CURSOR_AGENT_BIN`**.
+
+**Compound @mentions** (audit + Redmine note): e.g. “connect to amvara3, check journal, add summary to issue 7001” — prefilter detects both signals, **`nl_planner`** returns a validated multi-step plan, steps run sequentially. If the planner LLM is unavailable and a host is known, Ultron runs the Amvara audit path (pi→CA) instead of failing the whole message.
 
 Session logs: **`data/pi/`** and **`data/cursor-agent/`** under **`ULTRON_STATE_DIR`**.
 

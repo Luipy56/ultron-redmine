@@ -114,10 +114,14 @@ def run_doctor() -> int:
             return pings_ok
 
         try:
-            if isinstance(llm, LLMChainClient):
-                await llm.ping_primary()
-                ep = format_llm_endpoint(llm.primary_base_url)
-                print(f"LLM: OK (chain primary model {llm.model!r} @ {ep})")
+            from ultron.llm_cursor_fallback import llm_chain_client
+
+            chain = llm_chain_client(llm)
+            if chain is not None:
+                await chain.ping_primary()
+                ep = format_llm_endpoint(chain.primary_base_url)
+                fb = " + cursor-agent LLM fallback" if type(llm).__name__ == "LLMWithCursorAgentFallback" else ""
+                print(f"LLM: OK (chain primary model {chain.model!r} @ {ep}{fb})")
             else:
                 print(f"LLM: SKIP (unknown backend {type(llm).__name__})")
         except Exception as e:

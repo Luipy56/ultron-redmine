@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from ultron.llm import LLMBackend
+from ultron.llm import ChainSkipCallback, LLMBackend
 
 logger = logging.getLogger(__name__)
 
@@ -291,13 +291,18 @@ async def run_nl_router(
     *,
     user_text: str,
     via: str,
+    on_chain_skip: ChainSkipCallback | None = None,
 ) -> NLRouterOutcome:
     """One LLM call: model returns JSON; parsed and validated in code."""
     ut = user_text.strip() if user_text else ""
     if not ut:
         ut = "(empty message)"
     user_prompt = f"How should the bot respond?\n\nUser message (via={via}):\n{ut}"
-    raw = await llm.complete(system=NL_ROUTER_SYSTEM, user=user_prompt)
+    raw = await llm.complete(
+        system=NL_ROUTER_SYSTEM,
+        user=user_prompt,
+        on_chain_skip=on_chain_skip,
+    )
     if not raw.strip():
         return NLParseError("model returned empty response")
     return parse_router_json_text(raw)

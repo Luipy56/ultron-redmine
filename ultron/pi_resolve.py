@@ -27,6 +27,9 @@ class PiRunSettings:
     ollama_connect_timeout_seconds: float
     ollama_connect_retries: int
     ollama_connect_retry_delay_seconds: float
+    ollama_busy_check: bool
+    ollama_busy_if_models_loaded: bool
+    ollama_inference_probe_seconds: float
 
 
 def default_repo_root() -> Path:
@@ -71,6 +74,20 @@ def _resolve_path_under_repo(repo_root: Path, raw: str, *, default: Path) -> Pat
 def _ollama_chain_entry(chain: tuple[LLMProviderSpec, ...]) -> LLMProviderSpec:
     idx = resolve_ol_provider_index(chain, None)
     return chain[idx]
+
+
+def resolve_ollama_endpoint(app_cfg: AppConfig) -> tuple[str, str] | None:
+    """Return ``(base_url, model)`` for the first Ollama-like ``llm_chain`` entry, or ``None``."""
+    chain = app_cfg.llm_chain
+    if chain is None:
+        return None
+    if not any(is_ollama_like_spec(s) for s in chain):
+        return None
+    pi_cfg = app_cfg.pi
+    ollama_spec = _ollama_chain_entry(chain)
+    base = pi_cfg.ollama_base_url.strip() or ollama_spec.base_url
+    model = pi_cfg.model.strip() or ollama_spec.model
+    return base, model
 
 
 def pi_availability_message(app_cfg: AppConfig, *, repo_root: Path | None = None) -> str | None:
@@ -162,4 +179,7 @@ def build_pi_run_settings(
         ollama_connect_timeout_seconds=pi_cfg.ollama_connect_timeout_seconds,
         ollama_connect_retries=pi_cfg.ollama_connect_retries,
         ollama_connect_retry_delay_seconds=pi_cfg.ollama_connect_retry_delay_seconds,
+        ollama_busy_check=pi_cfg.ollama_busy_check,
+        ollama_busy_if_models_loaded=pi_cfg.ollama_busy_if_models_loaded,
+        ollama_inference_probe_seconds=pi_cfg.ollama_inference_probe_seconds,
     )

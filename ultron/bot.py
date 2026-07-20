@@ -5,6 +5,7 @@ import logging
 import os
 import random
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Literal
 import time
 import traceback
@@ -55,6 +56,7 @@ from ultron.llm import (
     format_llm_endpoint,
     safe_exc_message,
 )
+from ultron.llm_cursor_fallback import LLMWithCursorAgentFallback, llm_chain_client
 from ultron.amvara.executor import (
     AuditAgent,
     amvara_availability_message,
@@ -68,9 +70,16 @@ from ultron.amvara.planner import (
     NLPlanParseError,
     run_nl_planner,
 )
-from ultron.amvara.prefilter import MessageIntent, PrefilterResult, classify_message, extract_amvara_task
+from ultron.amvara.prefilter import (
+    MessageIntent,
+    PrefilterResult,
+    classify_message,
+    extract_amvara_hosts,
+    extract_amvara_task,
+)
 from ultron.amvara.registry import AmvaraRegistry, build_amvara_registry
 from ultron.amvara.ssh_preflight import warm_ssh_known_hosts
+from ultron.ollama_reachability import ensure_ollama_ready_for_inference
 from ultron.ollama_slash import format_ol_reply, run_ol_advisor
 from ultron.pi_agent import (
     build_pi_run_settings,
@@ -78,6 +87,7 @@ from ultron.pi_agent import (
     format_pi_reply,
     pi_availability_message,
 )
+from ultron.pi_resolve import resolve_ollama_endpoint
 from ultron.nl_router import (
     NLAdminRejected,
     NLChat,
@@ -124,6 +134,17 @@ _STARTUP_LOG_EXTRA: dict[str, str] = {"startup_phase": "STARTUP", "message_sourc
 _TIMEOUT_USER_MSG = (
     "The language model did not respond in time. Try a shorter ticket, a faster model, "
     "or increase **timeout_seconds** on the relevant **llm_chain** entry in `config.yaml`."
+)
+_NL_REDMINE_LLM_UNAVAILABLE_MSG = (
+    "The language model is unavailable or busy (often a shared Ollama host). "
+    "Use slash commands such as **/summary**, **/ask_issue**, **/list_new_issues**, or **/find_issue** "
+    "instead of natural-language routing for Redmine work."
+)
+_OLLAMA_BUSY_PI_MSG = (
+    "**Ollama busy**\n"
+    "The Ollama host did not become ready for inference in time (another job may be running). "
+    "For Amvara server work use **/audit** or **/ca** (cursor-agent). "
+    "Otherwise wait and retry, or free the Ollama host."
 )
 
 
@@ -207,11 +228,20 @@ def _format_status_message(
 
     if isinstance(llm, NullLLMBackend) or not env.llm_enabled:
         llm_line = "• **Language model:** off — `/summary`, `/ask_issue`, `/note`, and NL routing need **llm_chain**"
-    elif isinstance(llm, LLMChainClient):
-        n = len(app_cfg.llm_chain) if app_cfg.llm_chain else 0
-        llm_line = f"• **Language model:** provider chain (**{n}** slots) · default model **`{llm.model}`**"
     else:
-        llm_line = "• **Language model:** configured"
+        chain = llm_chain_client(llm)
+        ca_fb = isinstance(llm, LLMWithCursorAgentFallback)
+        if chain is not None:
+            n = len(app_cfg.llm_chain) if app_cfg.llm_chain else 0
+            fb = " · **cursor-agent** LLM fallback on" if ca_fb else ""
+            llm_line = (
+                f"• **Language model:** provider chain (**{n}** slots) · default model "
+                f"**`{chain.model}`**{fb}"
+            )
+        else:
+            llm_line = "• **Language model:** configured" + (
+                " · **cursor-agent** LLM fallback on" if ca_fb else ""
+            )
 
     nl_on = _nl_commands_enabled(app_cfg, env)
     nl_line = "• **@mention routing:** on (LLM maps mentions to allowed commands)" if nl_on else "• **@mention routing:** off"
@@ -1108,6 +1138,40 @@ def _llm_chain_skip_discord_cb(
     return _on_skip
 
 
+def _llm_chain_skip_nl_discord_cb(
+    *,
+    message: discord.Message,
+    status_message: discord.Message | None,
+    template: str,
+    feature: str = "nl_router",
+) -> Callable[[ChainSkipNotice], Awaitable[None]]:
+    """Edit the NL processing bubble when llm_chain fails over (e.g. to cursor-agent)."""
+
+    async def _on_skip(notice: ChainSkipNotice) -> None:
+        try:
+            text = template.format(
+                from_entry=notice.from_entry,
+                from_model=notice.from_model,
+                to_entry=notice.to_entry,
+                to_model=notice.to_model,
+                reason=notice.reason,
+            )
+            await _nl_edit_or_reply(message, status_message, text)
+            log_chat_mention_output(
+                message,
+                action="edited status (LLM chain skipped to next provider)",
+                fields=(
+                    f"from_model={notice.from_model!r} to_model={notice.to_model!r} "
+                    f"reason={notice.reason!r}"
+                ),
+                feature=feature,
+            )
+        except Exception as e:
+            logger.warning("NL LLM chain skip: Discord status update failed: %s", e)
+
+    return _on_skip
+
+
 def _log_slash_command_failure(command: str, exc: BaseException) -> None:
     """Log traceback frames without dumping multi‑KB exception strings (e.g. HTML error pages)."""
     tb = "".join(traceback.format_tb(exc.__traceback__)) if exc.__traceback__ else ""
@@ -1672,11 +1736,34 @@ class UltronBot(commands.Bot):
     ) -> None:
         """Existing single-shot NL router (Redmine-only or general)."""
         t0 = time.monotonic()
+        on_skip = _llm_chain_skip_nl_discord_cb(
+            message=message,
+            status_message=status_message,
+            template=self.app_cfg.discord.llm_chain_skip_status,
+            feature="nl_router",
+        )
+
+        async def _on_llm_failure(user_msg: str, *, action: str) -> None:
+            hosts = extract_amvara_hosts(user_text)
+            handled = await self._nl_try_amvara_fallback_after_llm_failure(
+                message,
+                user_text,
+                status_message=status_message,
+                via=via,
+                hosts=hosts,
+                feature="nl_router_llm_fallback",
+            )
+            if handled:
+                return
+            await _nl_edit_or_reply(message, status_message, user_msg)
+            log_chat_mention_output(message, action=action, feature="nl_router")
+
         try:
             outcome = await run_nl_router(
                 self.llm,
                 user_text=user_text,
                 via=via,
+                on_chain_skip=on_skip,
             )
         except NoLLMConfiguredError:
             await _nl_edit_or_reply(message, status_message, _NO_LLM_SLASH_MSG)
@@ -1684,8 +1771,7 @@ class UltronBot(commands.Bot):
             return
         except (APITimeoutError, httpx.TimeoutException) as e:
             logger.warning("nl_router LLM timeout: %s", e)
-            await _nl_edit_or_reply(message, status_message, _TIMEOUT_USER_MSG)
-            log_chat_mention_output(message, action="routed (LLM timeout)", feature="nl_router")
+            await _on_llm_failure(_NL_REDMINE_LLM_UNAVAILABLE_MSG, action="routed (LLM timeout)")
             return
         except LLMChainExhaustedError as e:
             logger.error(
@@ -1694,8 +1780,7 @@ class UltronBot(commands.Bot):
                 type(e.last_error).__name__,
                 safe_exc_message(e.last_error),
             )
-            await _nl_edit_or_reply(message, status_message, self.app_cfg.discord.llm_chain_all_failed_message)
-            log_chat_mention_output(message, action="routed (LLM chain exhausted)", feature="nl_router")
+            await _on_llm_failure(_NL_REDMINE_LLM_UNAVAILABLE_MSG, action="routed (LLM chain exhausted)")
             return
         except (APIConnectionError, APIStatusError) as e:
             logger.warning(
@@ -1703,12 +1788,7 @@ class UltronBot(commands.Bot):
                 type(e).__name__,
                 safe_exc_message(e),
             )
-            await _nl_edit_or_reply(
-                message,
-                status_message,
-                _llm_openai_compat_user_message(),
-            )
-            log_chat_mention_output(message, action="routed (LLM API error)", feature="nl_router")
+            await _on_llm_failure(_NL_REDMINE_LLM_UNAVAILABLE_MSG, action="routed (LLM API error)")
             return
         except Exception as e:
             logger.exception("nl_router failed: %s", e)
@@ -1817,6 +1897,83 @@ class UltronBot(commands.Bot):
                 feature="nl_router",
             )
 
+    async def _nl_try_amvara_fallback_after_llm_failure(
+        self,
+        message: discord.Message,
+        user_text: str,
+        *,
+        status_message: discord.Message | None,
+        via: str,
+        hosts: tuple[str, ...],
+        feature: str,
+    ) -> bool:
+        """If Amvara hosts are known, run audit (pi→CA) instead of an LLM error. Return True if handled."""
+        if not hosts:
+            return False
+        unavailable = amvara_availability_message(self.app_cfg)
+        if unavailable is not None:
+            return False
+        host = hosts[0]
+        try:
+            self.amvara_registry.validate_host(host)
+        except ValueError:
+            return False
+        task = extract_amvara_task(user_text, hosts)
+        try:
+            if status_message is not None:
+                await status_message.edit(
+                    content=(
+                        f"Language model unavailable — running **Amvara audit** on "
+                        f"**`{escape_markdown(host)}`** (cursor-agent if Ollama is busy)…"
+                    )
+                )
+        except discord.HTTPException:
+            pass
+        logger.warning(
+            "source=chat | nl_llm_fallback_amvara | host=%s | feature=%s",
+            host,
+            feature,
+            extra={"chat_phase": "ROUTER", "message_source": "chat"},
+        )
+        await self._deliver_amvara_audit_reply(
+            message,
+            host=host,
+            task=task,
+            status_message=status_message,
+            session_context=(
+                f"Discord user: {message.author} (id={message.author.id}). via={via}. "
+                "LLM unavailable; Amvara fallback."
+            ),
+            feature=feature,
+        )
+        return True
+
+    async def _ollama_ready_for_nl_agent(self) -> bool:
+        """False when busy checks are on and Ollama is unreachable/busy (skip long LLM waits)."""
+        if not self.app_cfg.pi.ollama_busy_check:
+            return True
+        endpoint = resolve_ollama_endpoint(self.app_cfg)
+        if endpoint is None:
+            return True
+        base_url, model = endpoint
+        pi_cfg = self.app_cfg.pi
+        tunnel_raw = (
+            os.environ.get("ULTRON_OLLAMA_TUNNEL_SCRIPT", "").strip() or pi_cfg.tunnel_script.strip()
+        )
+        tunnel_script = Path(tunnel_raw).expanduser() if tunnel_raw else None
+        readiness = await ensure_ollama_ready_for_inference(
+            base_url,
+            model=model,
+            tunnel_script=tunnel_script,
+            connect_timeout_seconds=pi_cfg.ollama_connect_timeout_seconds,
+            connect_retries=max(1, min(2, pi_cfg.ollama_connect_retries)),
+            connect_retry_delay_seconds=pi_cfg.ollama_connect_retry_delay_seconds,
+            busy_check=True,
+            busy_if_models_loaded=pi_cfg.ollama_busy_if_models_loaded,
+            inference_probe_seconds=pi_cfg.ollama_inference_probe_seconds,
+        )
+        return readiness.ok
+
     async def _run_nl_amvara_only(
         self,
         message: discord.Message,
@@ -1880,11 +2037,30 @@ class UltronBot(commands.Bot):
             await _nl_edit_or_reply(message, status_message, _NO_LLM_SLASH_MSG)
             return
 
+        if pre.amvara_hosts and not await self._ollama_ready_for_nl_agent():
+            handled = await self._nl_try_amvara_fallback_after_llm_failure(
+                message,
+                user_text,
+                status_message=status_message,
+                via=via,
+                hosts=pre.amvara_hosts,
+                feature="nl_compound_ollama_busy",
+            )
+            if handled:
+                return
+
         try:
             if status_message is not None:
                 await status_message.edit(content="Planning multi-step task…")
         except discord.HTTPException:
             pass
+
+        on_skip = _llm_chain_skip_nl_discord_cb(
+            message=message,
+            status_message=status_message,
+            template=self.app_cfg.discord.llm_chain_skip_status,
+            feature="nl_compound",
+        )
 
         t0 = time.monotonic()
         try:
@@ -1893,18 +2069,59 @@ class UltronBot(commands.Bot):
                 user_text=user_text,
                 registry=self.amvara_registry,
                 via=via,
+                on_chain_skip=on_skip,
             )
         except (APITimeoutError, httpx.TimeoutException):
+            handled = await self._nl_try_amvara_fallback_after_llm_failure(
+                message,
+                user_text,
+                status_message=status_message,
+                via=via,
+                hosts=pre.amvara_hosts,
+                feature="nl_compound_llm_timeout",
+            )
+            if handled:
+                return
             await _nl_edit_or_reply(message, status_message, _TIMEOUT_USER_MSG)
             return
         except LLMChainExhaustedError:
+            handled = await self._nl_try_amvara_fallback_after_llm_failure(
+                message,
+                user_text,
+                status_message=status_message,
+                via=via,
+                hosts=pre.amvara_hosts,
+                feature="nl_compound_llm_exhausted",
+            )
+            if handled:
+                return
             await _nl_edit_or_reply(message, status_message, self.app_cfg.discord.llm_chain_all_failed_message)
             return
         except (APIConnectionError, APIStatusError):
+            handled = await self._nl_try_amvara_fallback_after_llm_failure(
+                message,
+                user_text,
+                status_message=status_message,
+                via=via,
+                hosts=pre.amvara_hosts,
+                feature="nl_compound_llm_api_error",
+            )
+            if handled:
+                return
             await _nl_edit_or_reply(message, status_message, _llm_openai_compat_user_message())
             return
         except Exception as e:
             logger.exception("nl_planner failed: %s", e)
+            handled = await self._nl_try_amvara_fallback_after_llm_failure(
+                message,
+                user_text,
+                status_message=status_message,
+                via=via,
+                hosts=pre.amvara_hosts,
+                feature="nl_compound_planner_error",
+            )
+            if handled:
+                return
             await _nl_edit_or_reply(message, status_message, "Could not plan that task. Check bot logs.")
             return
 
@@ -2318,13 +2535,19 @@ class UltronBot(commands.Bot):
                 return
             if cmd == "summary":
                 issue_id = int(args["issue_id"])
+                on_skip = _llm_chain_skip_nl_discord_cb(
+                    message=message,
+                    status_message=status_message,
+                    template=self.app_cfg.discord.llm_chain_skip_status,
+                    feature="nl_summary",
+                )
                 text = await summarize_issue(
                     redmine=self.redmine,
                     llm=self.llm,
                     issue_id=issue_id,
                     log_read_messages=self.app_cfg.logging.log_read_messages,
                     on_before_llm=None,
-                    on_llm_chain_skip=None,
+                    on_llm_chain_skip=on_skip,
                     issue_metadata_header=self.app_cfg.discord.issue_metadata_header,
                 )
                 await _reply_chunked_to_message(message, text, edit_first=status_message)
@@ -2332,6 +2555,12 @@ class UltronBot(commands.Bot):
             if cmd == "ask_issue":
                 issue_id = int(args["issue_id"])
                 question = str(args["question"])
+                on_skip = _llm_chain_skip_nl_discord_cb(
+                    message=message,
+                    status_message=status_message,
+                    template=self.app_cfg.discord.llm_chain_skip_status,
+                    feature="nl_ask_issue",
+                )
                 text = await ask_about_issue(
                     redmine=self.redmine,
                     llm=self.llm,
@@ -2339,7 +2568,7 @@ class UltronBot(commands.Bot):
                     question=question,
                     log_read_messages=self.app_cfg.logging.log_read_messages,
                     on_before_llm=None,
-                    on_llm_chain_skip=None,
+                    on_llm_chain_skip=on_skip,
                     issue_metadata_header=self.app_cfg.discord.issue_metadata_header,
                 )
                 await _reply_chunked_to_message(message, text, edit_first=status_message)
@@ -2347,13 +2576,19 @@ class UltronBot(commands.Bot):
             if cmd == "note":
                 issue_id = int(args["issue_id"])
                 raw = resolve_note_body(str(args["text"]), reply_ctx)
+                on_skip = _llm_chain_skip_nl_discord_cb(
+                    message=message,
+                    status_message=status_message,
+                    template=self.app_cfg.discord.llm_chain_skip_status,
+                    feature="nl_note",
+                )
                 posted, url = await add_formatted_note(
                     redmine=self.redmine,
                     llm=self.llm,
                     issue_id=issue_id,
                     raw_text=raw,
                     log_read_messages=self.app_cfg.logging.log_read_messages,
-                    on_llm_chain_skip=None,
+                    on_llm_chain_skip=on_skip,
                     note_author_label=_discord_note_author_label(message.author),
                 )
                 excerpt = posted[:500] + ("…" if len(posted) > 500 else "")
@@ -2370,6 +2605,12 @@ class UltronBot(commands.Bot):
                     await _err(_NO_LLM_SLASH_MSG)
                     return
                 text = str(args["text"])
+                on_skip = _llm_chain_skip_nl_discord_cb(
+                    message=message,
+                    status_message=status_message,
+                    template=self.app_cfg.discord.llm_chain_skip_status,
+                    feature="nl_ol",
+                )
                 display_model, body = await run_ol_advisor(
                     llm=self.llm,
                     chain=chain,
@@ -2377,6 +2618,7 @@ class UltronBot(commands.Bot):
                     session_context=(
                         f"Discord user: {message.author} (id={message.author.id}). NL invoke: ol"
                     ),
+                    on_chain_skip=on_skip,
                 )
                 reply = format_ol_reply(display_model=display_model, body=body)
                 await _reply_chunked_to_message(message, reply, edit_first=status_message)
@@ -2410,10 +2652,9 @@ class UltronBot(commands.Bot):
 
     def _slash_register_llm_extras(self) -> tuple[bool, bool]:
         """Register optional ``llm_provider`` / ``llm_model`` on LLM slash commands when a real LLM exists."""
-        if isinstance(self.llm, NullLLMBackend):
-            return False, False
         chain = self.app_cfg.llm_chain
-        assert chain is not None
+        if chain is None or isinstance(self.llm, NullLLMBackend):
+            return False, False
         return llm_chain_slash_flags(chain)
 
     def _slash_resolve_llm_kw_display(
@@ -3212,7 +3453,11 @@ class UltronBot(commands.Bot):
             log_slash_error("pi", interaction, action="timeout", detail=e)
         except ConnectionError as e:
             guard.stop()
-            await pi_error(f"**Ollama unavailable**\n{e}")
+            detail = str(e)
+            if "busy" in detail.casefold() or "too slow" in detail.casefold():
+                await pi_error(_OLLAMA_BUSY_PI_MSG)
+            else:
+                await pi_error(f"**Ollama unavailable**\n{e}")
             log_slash_error("pi", interaction, action="connection error", detail=e)
         except RuntimeError as e:
             guard.stop()

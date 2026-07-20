@@ -170,12 +170,22 @@ llm_chain: []
 
 # pi — `/pi` slash command (bot admins only): pi.dev coding agent with Ollama on the Ultron checkout.
 # Requires `npm install` in the repo (`@earendil-works/pi-coding-agent`) and an Ollama-like `llm_chain` entry.
+# Also used for Amvara `/audit` (pi first). When Ollama is busy/unreachable, Amvara falls back to cursor-agent.
+# ollama_busy_check — If true, probe readiness before long pi work (Amvara skip-to-CA; `/pi` fail-fast).
+# Example: true
+# ollama_busy_if_models_loaded — If true with busy_check, treat any `/api/ps` loaded model as busy (aggressive).
+# Example: false
+# ollama_inference_probe_seconds — Tiny `/api/generate` timeout; 0 disables. Timeout/5xx ⇒ busy.
+# Example: 12
 # Example:
 # pi:
 #   enabled: true
 #   workspace: ""
 #   model: ""
 #   timeout_seconds: 900
+#   ollama_busy_check: true
+#   ollama_busy_if_models_loaded: false
+#   ollama_inference_probe_seconds: 12
 pi: {}
 
 # amvara — Multi-host SSH audits from the Ultron host (`/audit`, `/ca`, NL @mention routing).
@@ -204,13 +214,19 @@ pi: {}
 #     timeout_seconds: 900
 amvara: {}
 
-# cursor_agent — Fallback agent for Amvara audits when pi fails or `/ca` is used explicitly.
+# cursor_agent — Amvara audit agent (`/ca`, pi fallback) and optional LLM completion fallback.
+# llm_fallback_enabled — When true, cursor-agent answers chat completions if llm_chain (e.g. Ollama) fails.
+# Example: true
+# llm_fallback_timeout_seconds — Timeout for LLM-fallback cursor-agent sessions.
+# Example: 240
 # Example:
 # cursor_agent:
 #   enabled: true
 #   bin_path: ""
 #   workspace: ""
 #   timeout_seconds: 900
+#   llm_fallback_enabled: true
+#   llm_fallback_timeout_seconds: 240
 cursor_agent:
   enabled: true
 

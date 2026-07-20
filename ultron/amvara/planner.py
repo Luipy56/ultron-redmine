@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ultron.amvara.registry import AmvaraRegistry
-from ultron.llm import LLMBackend
+from ultron.llm import ChainSkipCallback, LLMBackend
 from ultron.nl_router import NL_ALLOWED_COMMANDS, NL_FORBIDDEN_COMMANDS, _validate_args, extract_json_text
 
 logger = logging.getLogger(__name__)
@@ -152,13 +152,18 @@ async def run_nl_planner(
     user_text: str,
     registry: AmvaraRegistry,
     via: str,
+    on_chain_skip: ChainSkipCallback | None = None,
 ) -> NLPlanOutcome:
     allowed = ", ".join(registry.list_allowed_hosts()) or "(none)"
     user_prompt = (
         f"Allowed Amvara hosts: {allowed}\n"
         f"User message (via={via}):\n{user_text.strip()}"
     )
-    raw = await llm.complete(system=NL_PLANNER_SYSTEM, user=user_prompt)
+    raw = await llm.complete(
+        system=NL_PLANNER_SYSTEM,
+        user=user_prompt,
+        on_chain_skip=on_chain_skip,
+    )
     if not raw.strip():
         return NLPlanParseError("model returned empty response")
     return parse_plan_json_text(raw, registry)

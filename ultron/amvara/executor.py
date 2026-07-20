@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -18,8 +19,9 @@ from ultron.cursor_agent import (
     call_cursor_agent_session,
     render_prompt_template,
 )
-from ultron.pi_agent import PiAgentResult, call_pi_agent, format_pi_reply
-from ultron.pi_resolve import build_pi_run_settings, pi_availability_message
+from ultron.ollama_reachability import OllamaReadiness, ensure_ollama_ready_for_inference
+from ultron.pi_agent import PiAgentResult, call_pi_agent
+from ultron.pi_resolve import build_pi_run_settings, pi_availability_message, resolve_ollama_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,7 @@ class AmvaraAuditResult:
     pi_result: PiAgentResult | None = None
     ca_result: CursorAgentResult | None = None
     fallback_used: bool = False
+    fallback_reason: str | None = None
 
 
 def amvara_availability_message(app_cfg: AppConfig, *, repo_root: Path | None = None) -> str | None:
@@ -86,6 +89,47 @@ def _template_vars(host: AmvaraHost) -> dict[str, str]:
     }
 
 
+def _ca_result_with_fallback(ca: AmvaraAuditResult, *, reason: str) -> AmvaraAuditResult:
+    return AmvaraAuditResult(
+        host=ca.host,
+        agent=ca.agent,
+        body=ca.body,
+        ok=ca.ok,
+        ca_result=ca.ca_result,
+        fallback_used=True,
+        fallback_reason=reason,
+    )
+
+
+async def _probe_ollama_for_amvara_pi(
+    app_cfg: AppConfig,
+    *,
+    on_progress: ProgressCallback | None,
+) -> OllamaReadiness | None:
+    """Return readiness when busy checks are enabled; ``None`` means skip the pre-check."""
+    if not app_cfg.pi.ollama_busy_check:
+        return None
+    endpoint = resolve_ollama_endpoint(app_cfg)
+    if endpoint is None:
+        return None
+    base_url, model = endpoint
+    pi_cfg = app_cfg.pi
+    tunnel_raw = os.environ.get("ULTRON_OLLAMA_TUNNEL_SCRIPT", "").strip() or pi_cfg.tunnel_script.strip()
+    tunnel_script = Path(tunnel_raw).expanduser() if tunnel_raw else None
+    return await ensure_ollama_ready_for_inference(
+        base_url,
+        model=model,
+        tunnel_script=tunnel_script,
+        connect_timeout_seconds=pi_cfg.ollama_connect_timeout_seconds,
+        connect_retries=pi_cfg.ollama_connect_retries,
+        connect_retry_delay_seconds=pi_cfg.ollama_connect_retry_delay_seconds,
+        busy_check=True,
+        busy_if_models_loaded=pi_cfg.ollama_busy_if_models_loaded,
+        inference_probe_seconds=pi_cfg.ollama_inference_probe_seconds,
+        on_progress=on_progress,
+    )
+
+
 async def _run_pi_audit(
     *,
     app_cfg: AppConfig,
@@ -101,10 +145,13 @@ async def _run_pi_audit(
 
     base = build_pi_run_settings(app_cfg, state_dir=state_dir)
     prompt_path = _write_rendered_prompt(_pi_prompt_template(host), **_template_vars(host))
+    # Outer run_amvara_audit already probed Ollama; avoid a second long probe.
     settings = replace(
         base,
         prompt_path=prompt_path,
         timeout_seconds=registry.timeout_seconds,
+        ollama_busy_check=False,
+        ollama_inference_probe_seconds=0.0,
     )
     try:
         result = await call_pi_agent(
@@ -119,7 +166,6 @@ async def _run_pi_audit(
         except OSError:
             pass
 
-    body = format_pi_reply(result=result, secret_literals=secret_literals)
     header = f"**Amvara audit** · `{host.name}` · pi · `{result.model}`\n\n"
     return AmvaraAuditResult(
         host=host.name,
@@ -233,15 +279,32 @@ async def run_amvara_audit(
                 registry=registry,
                 secret_literals=secret_literals,
             )
-            return AmvaraAuditResult(
-                host=ca.host,
-                agent=ca.agent,
-                body=ca.body,
-                ok=ca.ok,
-                ca_result=ca.ca_result,
-                fallback_used=True,
-            )
+            return _ca_result_with_fallback(ca, reason="pi_unavailable")
         raise RuntimeError(pi_unavail.replace("**", ""))
+
+    readiness = await _probe_ollama_for_amvara_pi(app_cfg, on_progress=on_progress)
+    if readiness is not None and not readiness.ok:
+        reason = readiness.reason or "ollama_unavailable"
+        if registry.fallback_enabled and app_cfg.cursor_agent.enabled:
+            logger.warning(
+                "ollama not ready for amvara pi on %s (%s), falling back to cursor-agent",
+                host.name,
+                reason,
+            )
+            ca = await _run_ca_audit(
+                app_cfg=app_cfg,
+                host=host,
+                state_dir=state_dir,
+                task=task,
+                session_context=session_context,
+                registry=registry,
+                secret_literals=secret_literals,
+            )
+            return _ca_result_with_fallback(ca, reason=reason)
+        raise RuntimeError(
+            f"Ollama is not ready for pi ({reason}). Enable cursor-agent fallback "
+            "or free the Ollama host."
+        )
 
     try:
         pi = await _run_pi_audit(
@@ -275,11 +338,4 @@ async def run_amvara_audit(
         registry=registry,
         secret_literals=secret_literals,
     )
-    return AmvaraAuditResult(
-        host=ca.host,
-        agent=ca.agent,
-        body=ca.body,
-        ok=ca.ok,
-        ca_result=ca.ca_result,
-        fallback_used=True,
-    )
+    return _ca_result_with_fallback(ca, reason="pi_failed")

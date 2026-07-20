@@ -3,7 +3,8 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 
-from ultron.llm import ChainSkipCallback, LLMBackend, LLMChainClient
+from ultron.llm import ChainSkipCallback, LLMBackend
+from ultron.llm_cursor_fallback import llm_chain_client
 from ultron.readlog import log_read_payload
 from ultron.redmine import IssueNotFound, RedmineClient
 from ultron.textutil import format_issue_for_summary, format_issue_metadata_header
@@ -84,14 +85,14 @@ async def summarize_issue(
     wf_info(logger, "summarize_issue", _WF_LLM_CALL, "issue_id=%s", issue_id)
     if isinstance(llm_display_model, str) and llm_display_model.strip():
         display = llm_display_model.strip()
-    elif isinstance(llm, LLMChainClient):
-        display = llm.display_model_for_start(start_provider)
     else:
-        display = llm.model
+        chain = llm_chain_client(llm)
+        display = chain.display_model_for_start(start_provider) if chain is not None else llm.model
     if on_before_llm is not None:
         await on_before_llm(display)
     kw = _llm_complete_kwargs(start_provider=start_provider, model_override=model_override)
-    if isinstance(llm, LLMChainClient) and on_llm_chain_skip is not None:
+    chain = llm_chain_client(llm)
+    if chain is not None and on_llm_chain_skip is not None:
         out = await llm.complete(
             system=SUMMARY_SYSTEM,
             user=user_prompt,
@@ -147,14 +148,13 @@ async def ask_about_issue(
     wf_info(logger, "ask_about_issue", _WF_LLM_CALL, "issue_id=%s", issue_id)
     if isinstance(llm_display_model, str) and llm_display_model.strip():
         display = llm_display_model.strip()
-    elif isinstance(llm, LLMChainClient):
-        display = llm.display_model_for_start(start_provider)
     else:
-        display = llm.model
+        chain = llm_chain_client(llm)
+        display = chain.display_model_for_start(start_provider) if chain is not None else llm.model
     if on_before_llm is not None:
         await on_before_llm(display)
     kw = _llm_complete_kwargs(start_provider=start_provider, model_override=model_override)
-    if isinstance(llm, LLMChainClient) and on_llm_chain_skip is not None:
+    if llm_chain_client(llm) is not None and on_llm_chain_skip is not None:
         out = await llm.complete(
             system=ASK_ABOUT_ISSUE_SYSTEM,
             user=user_prompt,
@@ -218,7 +218,7 @@ async def add_formatted_note(
     )
     wf_info(logger, "add_formatted_note", _WF_LLM_CALL, "issue_id=%s", issue_id)
     kw = _llm_complete_kwargs(start_provider=start_provider, model_override=model_override)
-    if isinstance(llm, LLMChainClient) and on_llm_chain_skip is not None:
+    if llm_chain_client(llm) is not None and on_llm_chain_skip is not None:
         formatted = await llm.complete(
             system=NOTE_SYSTEM,
             user=user_prompt,

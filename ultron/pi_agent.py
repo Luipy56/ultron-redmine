@@ -13,7 +13,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from ultron.ollama_reachability import ensure_ollama_reachable, ollama_openai_base_url
+from ultron.ollama_reachability import (
+    REASON_BUSY_PROBE,
+    REASON_BUSY_PS,
+    REASON_UNREACHABLE,
+    ensure_ollama_ready_for_inference,
+    ollama_openai_base_url,
+)
 from ultron.pi_resolve import (
     PiRunSettings,
     build_pi_run_settings,
@@ -200,19 +206,35 @@ async def call_pi_agent(
     )
 
     await progress("Checking Ollama connection…")
-    reachable, tunnel_started = await ensure_ollama_reachable(
+    readiness = await ensure_ollama_ready_for_inference(
         settings.ollama_base_url,
+        model=settings.model,
         tunnel_script=settings.tunnel_script,
         connect_timeout_seconds=settings.ollama_connect_timeout_seconds,
         connect_retries=settings.ollama_connect_retries,
         connect_retry_delay_seconds=settings.ollama_connect_retry_delay_seconds,
+        busy_check=settings.ollama_busy_check,
+        busy_if_models_loaded=settings.ollama_busy_if_models_loaded,
+        inference_probe_seconds=settings.ollama_inference_probe_seconds,
         on_progress=on_progress,
     )
-    if not reachable:
+    tunnel_started = readiness.tunnel_script_ran
+    if not readiness.ok:
+        if readiness.reason in (REASON_BUSY_PS, REASON_BUSY_PROBE):
+            raise ConnectionError(
+                "Ollama is busy or too slow to start inference in time. "
+                "For Amvara hosts use **/audit** or **/ca** (cursor-agent). "
+                "Otherwise wait for the other job to finish, or raise "
+                "**pi.ollama_inference_probe_seconds** / free the Ollama host."
+            )
+        if readiness.reason == REASON_UNREACHABLE:
+            raise ConnectionError(
+                "Could not reach Ollama after several attempts. "
+                "Check that Ollama is running, `llm_chain` base_url is correct, "
+                "and optionally set ULTRON_OLLAMA_TUNNEL_SCRIPT for an SSH tunnel."
+            )
         raise ConnectionError(
-            "Could not reach Ollama after several attempts. "
-            "Check that Ollama is running, `llm_chain` base_url is correct, "
-            "and optionally set ULTRON_OLLAMA_TUNNEL_SCRIPT for an SSH tunnel."
+            "Ollama inference probe failed. Check the model id and that Ollama can serve requests."
         )
 
     await progress(f"Running **pi** with `{settings.model}`…")
