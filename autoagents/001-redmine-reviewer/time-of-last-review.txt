@@ -17,3 +17,9 @@ FEAT created: 0 (Redmine) + 0 (GitHub) = 0
 NEW created: 0 (logs)
 Notes: Redmine via .venv (preflight lacked httpx) — only Ultron open issue #7406 already CLOSED-7406 in done/; other open issues non-Ultron (MIF/CMDIP/firewall); GH unavailable (gh not on PATH); log hit approve unknown-token INFO (token_len=19) is expected deny, not a standing incident.
 Preflight: G001_REDMINE_OK=0 G001_GH_OK=0 G001_GH_AUTH_FAILED=0 G001_UNTRACKED_REDMINE=0 G001_UNTRACKED_GH=0 G001_LOG_SIGNALS=1
+
+=== 2026-07-22T18:36:11Z ===
+FEAT created: 0 (Redmine) + 0 (GitHub) = 0
+NEW created: 0 (logs)
+Notes: Synced main. Redmine via .venv (preflight lacked httpx) — only Ultron open umbrella #7406 already has FEAT-7406-20260722-1832-… from /upgrade (+ Redmine journal); other open issues are non-Ultron projects (CMDIP/MIF/ALH/firewall/etc.). GH unavailable (gh not on PATH). Log hit: approve unknown-token INFO (ERROR substring false-positive) expected deny; LLM Ollama timeout/connection on 2026-07-20 is provider/ops with user-visible fail path, not a standing code incident.
+Preflight: G001_REDMINE_OK=0 G001_GH_OK=0 G001_GH_AUTH_FAILED=0 G001_UNTRACKED_REDMINE=0 G001_UNTRACKED_GH=0 G001_LOG_SIGNALS=1

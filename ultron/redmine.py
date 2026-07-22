@@ -475,6 +475,52 @@ class RedmineClient:
         data = r.json()
         return list(data.get("time_entry_activities", []))
 
+    async def create_issue(
+        self,
+        *,
+        project_id: int | str,
+        subject: str,
+        description: str,
+    ) -> dict[str, Any]:
+        """POST a new issue. ``project_id`` is a numeric id or project identifier string.
+
+        Other fields use Redmine defaults (tracker, status, priority, …).
+        """
+        subj = (subject or "").strip()
+        if not subj:
+            raise ValueError("Issue **title** must be a non-empty string.")
+        if len(subj) > 255:
+            raise ValueError("Issue **title** must be at most **255** characters.")
+        desc = (description or "").strip()
+        if not desc:
+            raise ValueError("Issue **description** must be a non-empty string.")
+        body: dict[str, Any] = {
+            "project_id": project_id,
+            "subject": subj,
+            "description": desc,
+        }
+        async with self._client() as c:
+            r = await c.post("/issues.json", json={"issue": body})
+        if r.status_code == 403:
+            raise RedminePermissionError(
+                "Redmine **refused** creating this issue (**403**). "
+                "The API user may lack permission to add issues in that project."
+            )
+        if r.is_error:
+            hint = _redmine_user_hint(r.status_code, r.text)
+            msg = f"Redmine POST issues failed: {r.status_code} {r.text[:500]}"
+            err = RedmineError(msg)
+            if hint:
+                err.user_message = hint  # type: ignore[attr-defined]
+            elif r.status_code == 422:
+                err.user_message = (  # type: ignore[attr-defined]
+                    "Redmine rejected the issue (**422**). Check project, title, and description."
+                )
+            raise err
+        data = r.json()
+        issue = data.get("issue")
+        return issue if isinstance(issue, dict) else data
+
     async def create_time_entry(
         self,
         issue_id: int,

@@ -10,7 +10,12 @@ from typing import Any, Literal
 from discord.utils import escape_markdown
 
 from ultron.config import UnassignedOpenConfig
-from ultron.redmine import RedmineClient, RedmineError, resolve_status_id_by_name
+from ultron.redmine import (
+    RedmineClient,
+    RedmineError,
+    RedminePermissionError,
+    resolve_status_id_by_name,
+)
 
 TopTicketsKind = Literal["priority", "newests", "oldests"]
 
@@ -525,3 +530,82 @@ async def markdown_top_tickets(
     )
     body = header + "\n\n" + "\n".join(lines)
     return body, None, len(issues)
+
+
+async def create_new_ticket(
+    *,
+    redmine: RedmineClient,
+    project_query: str,
+    title: str,
+    description: str,
+) -> tuple[str | None, str | None, int]:
+    """Create a Redmine issue in a resolved project.
+
+    Returns ``(body, error, issue_id)``. ``issue_id`` is ``-1`` on error.
+    Project must match an existing Redmine project (identifier or name; fuzzy ok).
+    """
+    q = (project_query or "").strip()
+    if not q:
+        return (
+            None,
+            "Pass **`project`**: a Redmine project identifier or name (must match an existing project).",
+            -1,
+        )
+    subj = (title or "").strip()
+    if not subj:
+        return None, "Pass **`title`**: a non-empty issue subject (e.g. `[FOO] Bar`).", -1
+    desc = (description or "").strip()
+    if not desc:
+        return None, "Pass **`description`**: a non-empty issue description.", -1
+
+    try:
+        projects = await redmine.list_projects()
+    except RedmineError as e:
+        return None, f"Redmine error: {e}", -1
+
+    matched = resolve_redmine_project(q, projects)
+    if matched is None:
+        safe_q = escape_markdown(q)
+        return (
+            None,
+            f"No Redmine project matching **{safe_q}**. "
+            "Choose an existing project **identifier** or display **name** "
+            "(e.g. `10_AMVARA`); the bot will not invent a project.",
+            -1,
+        )
+
+    try:
+        issue = await redmine.create_issue(
+            project_id=matched.numeric_id,
+            subject=subj,
+            description=desc,
+        )
+    except ValueError as e:
+        return None, str(e), -1
+    except RedminePermissionError as e:
+        return None, str(e), -1
+    except RedmineError as e:
+        hint = getattr(e, "user_message", None)
+        return None, hint or f"Redmine error: {e}", -1
+
+    raw_id = issue.get("id")
+    try:
+        iid = int(raw_id)
+    except (TypeError, ValueError):
+        return None, "Redmine created an issue but returned no usable id.", -1
+
+    url = redmine.issue_url(iid)
+    safe_subj = escape_markdown(subj)
+    if len(safe_subj) > 200:
+        safe_subj = safe_subj[:197] + "..."
+    safe_name = escape_markdown(matched.name)
+    safe_ident = escape_markdown(matched.identifier)
+    match_note = ""
+    if not matched.exact:
+        safe_q = escape_markdown(q)
+        match_note = f" (matched from `{safe_q}`)"
+    body = (
+        f"Created issue [#{iid}]({url}): **{safe_subj}**\n"
+        f"• Project: **{safe_name}** (`{safe_ident}`){match_note}"
+    )
+    return body, None, iid

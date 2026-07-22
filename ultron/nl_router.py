@@ -28,6 +28,7 @@ NL_ALLOWED_COMMANDS: frozenset[str] = frozenset(
         "log_time",
         "time_summary",
         "ol",
+        "new_ticket",
     }
 )
 
@@ -81,6 +82,7 @@ Allowed command names and args (only these):
 - log_time — args {"issue_id": <positive integer>, "hours": <positive number>}
 - time_summary — args {"user": "<Redmine login, numeric user id, or me>"}
 - ol — args {"text": "<non-empty question or task for the local advisor>"}
+- new_ticket — args {"project":"<project identifier or name>", "title":"<non-empty subject>", "description":"<non-empty description>"}
 
 Rules:
 - If the user wants a ticket summary, use summary with issue_id.
@@ -92,6 +94,7 @@ Rules:
 - If they want a list of new/old/unassigned issues, pick the matching list command.
 - If they want to find/search for a ticket by keywords (hint, title fragment, note text) without knowing the id, use find_issue with text.
 - If they want the top N tickets in a specific project (by priority, newest, or oldest), use top_tickets with project (and optional kind_filter / limit).
+- If they want to create a new Redmine ticket/issue, use new_ticket with project (must be a real project name/identifier), title, and description. Do not invent a project.
 - The user message may include a replied-to Discord excerpt above a `---` separator. Treat deictic references (this, esto, all this, the above) as referring to that excerpt. Do not ask for clarification when the excerpt supplies the missing content.
 - If you are unsure, use kind chat with a brief clarification question.
 - NEVER output approve, remove, show_config, or token — those are not available here.
@@ -236,6 +239,11 @@ def _validate_args(command: str, args: Any) -> dict[str, Any]:
         else:
             limit = clamp_top_tickets_limit(_as_int(limit_raw, "limit"))
         return {"project": project, "kind_filter": kind, "limit": limit}
+    if command == "new_ticket":
+        project = _as_nonempty_str(args.get("project"), "project")
+        title = _as_nonempty_str(args.get("title", args.get("subject")), "title")
+        description = _as_nonempty_str(args.get("description"), "description")
+        return {"project": project, "title": title, "description": description}
     raise ValueError(f"unknown command {command!r}")
 
 
@@ -271,6 +279,8 @@ def parse_router_json_text(text: str) -> NLRouterOutcome:
         cmd = "find_issue"
     if cmd in ("top_ticket", "top_issues", "list_top_tickets"):
         cmd = "top_tickets"
+    if cmd in ("create_ticket", "create_issue", "new_issue", "create_new_ticket"):
+        cmd = "new_ticket"
 
     if cmd in NL_FORBIDDEN_COMMANDS:
         return NLAdminRejected(command=cmd)

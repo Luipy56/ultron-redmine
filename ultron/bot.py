@@ -40,6 +40,7 @@ from ultron.config import (
     llm_chain_slash_model_override,
 )
 from ultron.redmine_listings import (
+    create_new_ticket,
     markdown_find_issues,
     markdown_issues_by_status,
     markdown_top_tickets,
@@ -360,6 +361,7 @@ _HELP_TEXT = (
 • `/list_unassigned_issues` — Unassigned open issues past the minimum age (`discord.unassigned_open`).
 • `/find_issue` `text` — Full-text search for issues in the default Redmine project (`redmine.find_issue_project`, default **10_AMVARA**): subject, description, notes. Up to 20 titles (15 chars) + issue links; extras as issue-number links only.
 • `/top_tickets` `project` [`kind_filter`] [`limit`] — Top **open** issues in a project (fuzzy match on identifier or name). `kind_filter`: **priority** (default), **newests**, or **oldests**. `limit` default **10** (max 50).
+• `/new_ticket` `project` `title` `description` — Create a Redmine issue in an **existing** project (identifier or name; fuzzy match). Title and description are free text; other fields use Redmine defaults. Reply includes a link to the new issue.
 • `/time_summary` `user` — Redmine **spent hours** for a user: **today**, **this week** (Mon–today), **last 7 days** (by **spent_on**), and **last 24 h** (by **created_on**). `user` = Redmine login, numeric id, or **`me`**. If login lookup fails (permissions), set **redmine.user_id_by_login** in `config.yaml`.
 • `/log_time` `issue_id` `hours` [`comments`] [`spent_on`] — Log spent hours (booked as the **Redmine API key** user). Optional **comments** and **spent_on** (YYYY-MM-DD). See **REDMINE_TIME_ACTIVITY_ID** in `.env` when Redmine has several activities.
 • `/summary` `issue_id` [`llm_provider`] [`llm_model`] — Ticket summary (requires LLM). Optional provider/model: autocomplete when configured; omit for defaults.
@@ -371,7 +373,7 @@ _HELP_TEXT = (
 
 **@mention** or **reply**: whitelisted only. `discord.nl_commands` / `ULTRON_NL_COMMANDS` enables LLM routing into allowed commands (including Amvara audits and compound Redmine tasks).
 
-Without **llm_chain**, `/summary`, `/ask_issue`, `/note`, and `/ol` are unavailable; listings (including `/find_issue`, `/top_tickets`), `/ping`, `/rpsls`, and `/token` still work.
+Without **llm_chain**, `/summary`, `/ask_issue`, `/note`, and `/ol` are unavailable; listings (including `/find_issue`, `/top_tickets`), `/new_ticket`, `/ping`, `/rpsls`, and `/token` still work.
 
 **Bot admins only**
 • `/pi` `text` — Run **pi** with Ollama on the Ultron checkout (file/shell access in workspace). Requires `npm install` + Ollama in **llm_chain**.
@@ -446,6 +448,17 @@ def _nl_dispatch_status_line(command: str, args: dict[str, Any]) -> str:
         return (
             f"Listing top tickets in **{escape_markdown(proj) or '…'}** "
             f"({escape_markdown(kind)}, limit {lim})…"
+        )
+    if command == "new_ticket":
+        proj = str(args.get("project", "")).strip().replace("\n", " ")
+        if len(proj) > 80:
+            proj = proj[:79] + "…"
+        title = str(args.get("title", "")).strip().replace("\n", " ")
+        if len(title) > 80:
+            title = title[:79] + "…"
+        return (
+            f"Creating ticket in **{escape_markdown(proj) or '…'}**: "
+            f"**{escape_markdown(title) or '…'}**…"
         )
     if command == "summary":
         return f"Summarizing issue **#{int(args['issue_id'])}**…"
@@ -2441,6 +2454,20 @@ class UltronBot(commands.Bot):
                 assert body is not None
                 await _reply_chunked_to_message(message, body, edit_first=status_message)
                 return
+            if cmd == "new_ticket":
+                body, err, _iid = await create_new_ticket(
+                    redmine=self.redmine,
+                    project_query=str(args["project"]),
+                    title=str(args["title"]),
+                    description=str(args["description"]),
+                )
+                if err is not None:
+                    await _err(err)
+                    return
+                assert body is not None
+                self.record_redmine_write("issue_create")
+                await _reply_chunked_to_message(message, body, edit_first=status_message)
+                return
             if cmd == "log_time":
                 issue_id = int(args["issue_id"])
                 hours = float(args["hours"])
@@ -4354,6 +4381,65 @@ class UltronBot(commands.Bot):
                 kind_filter=kind,
                 limit=int(limit),
                 log_command="top_tickets",
+            )
+
+        @self.tree.command(
+            name="new_ticket",
+            description="Create a Redmine issue in an existing project (defaults for other fields).",
+        )
+        @app_commands.describe(
+            project="Redmine project identifier or name (must match an existing project)",
+            title="Issue subject (e.g. [FOO] Bar)",
+            description="Issue description body",
+        )
+        async def new_ticket_cmd(
+            interaction: discord.Interaction,
+            project: str,
+            title: str,
+            description: str,
+        ) -> None:
+            ephemeral = self.app_cfg.discord.ephemeral_default
+            proj = project.strip()
+            tit = title.strip()
+            desc = description.strip()
+            log_slash_input(
+                "new_ticket",
+                interaction,
+                fields=(
+                    f"ephemeral={ephemeral} project={_truncate_for_log(proj)!r} "
+                    f"title={_truncate_for_log(tit)!r} description_len={len(desc)}"
+                ),
+            )
+            if not proj or not tit or not desc:
+                await interaction.response.send_message(
+                    "Pass **`project`**, **`title`**, and **`description`** "
+                    "(all required; project must exist in Redmine).",
+                    ephemeral=True,
+                )
+                log_slash_output("new_ticket", interaction, action="missing required parameter")
+                return
+            await interaction.response.defer(ephemeral=ephemeral, thinking=True)
+            body, err, iid = await create_new_ticket(
+                redmine=self.redmine,
+                project_query=proj,
+                title=tit,
+                description=desc,
+            )
+            if err is not None:
+                await interaction.followup.send(err, ephemeral=ephemeral)
+                if "Redmine error:" in err or "refused" in err.casefold():
+                    log_slash_error("new_ticket", interaction, action="redmine request failed", detail=err)
+                else:
+                    log_slash_output("new_ticket", interaction, action="validation failed")
+                return
+            assert body is not None
+            self.record_redmine_write("issue_create")
+            await interaction.followup.send(body, ephemeral=ephemeral)
+            log_slash_output(
+                "new_ticket",
+                interaction,
+                action="created redmine issue",
+                fields=f"issue_id={iid} project={_truncate_for_log(proj)!r}",
             )
 
         @self.tree.command(
